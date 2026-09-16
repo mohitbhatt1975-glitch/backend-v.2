@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+pydantic
+httpx
+joblib
+pandas
+numpy
+scipy
+scikit-learn
+xgboost>=2.0.0

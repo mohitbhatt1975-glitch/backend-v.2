@@ -1,0 +1,213 @@
+"""
+generate_data.py  (v2)
+
+Fixes vs the original version:
+
+1. CRITICAL: Outside_Temp and Solar_Power used to be drawn independently at
+   random for EVERY hour, with zero correlation to time-of-day. That taught
+   the model there's no such thing as day/night -- so at inference time,
+   when it's fed real NASA data (which *is* smoothly diurnal), predictions
+   drift/misbehave. This version samples one realistic daily temperature
+   curve and one realistic daily solar curve per synthetic shelter, so the
+   model actually learns the day/night thermal-lag behaviour the PS is
+   about.
+
+2. Windows now have their own U-value and lose heat by conduction, instead
+   of only ever contributing solar gain. Previously more window area could
+   only ever help, which is physically backwards.
+
+3. Infiltration/openings (air changes per hour, ACH) is now a first-class,
+   separate heat-loss term -- directly answers the PS's "effect of
+   openings" requirement.
+
+4. Thermal mass is no longer an arbitrary constant. It's computed from
+   Thermal_Mass_Factor (J/(m^2*K) of wall area), which materials_library.py
+   derives from real material properties -- this is what lets you study
+   "composite multi-material" walls.
+
+5. Orientation_Factor represents how favourably the window-bearing wall
+   faces the sun (0.3 = poor orientation, 1.0 = optimal).
+
+6. Latin Hypercube Sampling instead of pure uniform random, for more even
+   coverage of the input space (matters most at the edges, which is where
+   the old "flatline" extrapolation problem bit hardest).
+"""
+
+import math
+import random
+
+import numpy as np
+import pandas as pd
+from scipy.stats import qmc
+
+random.seed(42)
+np.random.seed(42)
+
+N_SHELTERS = 2000
+HOURS = 24
+
+# ---- Sampling bounds for continuous static + daily-weather parameters ----
+# Order matters -- must match the LHS dimension order below.
+BOUNDS = {
+    "length":            (3.0, 10.0),      # m
+    "width":             (3.0, 10.0),      # m
+    "height":            (2.5, 4.0),       # m
+    "r_value":           (0.05, 3.0),      # m^2*K/W  (canvas tent .. thick insulated wall)
+    "thermal_mass_factor": (500.0, 600000.0),  # J/(m^2*K) of wall area (light fabric .. thick stone/adobe)
+    "window_area":       (0.5, 8.0),       # m^2
+    "window_u_value":    (1.0, 6.0),       # W/(m^2*K) (triple-glazed .. single pane)
+    "orientation_factor": (0.3, 1.0),      # 0.3 = poorly oriented, 1.0 = optimal solar-facing
+    "ach":               (0.3, 5.0),       # air changes per hour (well-sealed .. leaky)
+    "daily_mean_temp":   (-25.0, 5.0),     # deg C, Ladakh-representative winter ambient
+    "daily_amplitude":   (4.0, 15.0),      # deg C day/night swing
+    "daily_peak_solar":  (500.0, 1100.0),  # W/m^2, matches Ladakh's high irradiance
+}
+DIM_ORDER = list(BOUNDS.keys())
+
+AIR_VOLUMETRIC_HEAT_CAPACITY = 1200.0     # J/(m^3*K), density * specific heat of air
+INFILTRATION_COEFFICIENT = 0.34           # W/(m^3*K) per air-change-per-hour (standard HVAC rule of thumb)
+SOLAR_TRANSMITTANCE = 0.6                 # fraction of incident solar that becomes usable gain through glazing
+MAX_HOURLY_TEMP_CHANGE = 6.0              # deg C/hr numerical safety clamp (Euler-integration stability net,
+                                           # NOT meant to be the dominant physics -- real swings should mostly
+                                           # come from the actual energy balance, not this clamp)
+
+
+def sample_inputs(n):
+    sampler = qmc.LatinHypercube(d=len(DIM_ORDER), seed=42)
+    unit_samples = sampler.random(n)
+    lowers = np.array([BOUNDS[k][0] for k in DIM_ORDER])
+    uppers = np.array([BOUNDS[k][1] for k in DIM_ORDER])
+    scaled = qmc.scale(unit_samples, lowers, uppers)
+    return pd.DataFrame(scaled, columns=DIM_ORDER)
+
+
+def shape_geometry(shape_code, length, width, height):
+    if shape_code == 1:  # rectangular box
+        envelope_area = (2 * length * height) + (2 * width * height) + (length * width)
+        volume = length * width * height
+    elif shape_code == 2:  # dome / sphere
+        r = length / 2.0
+        envelope_area = 2 * math.pi * (r ** 2)
+        volume = (2 / 3) * math.pi * (r ** 3)
+    elif shape_code == 3:  # A-frame / triangular tent
+        slant = math.sqrt((width / 2) ** 2 + height ** 2)
+        envelope_area = (2 * slant * length) + (width * height)
+        volume = 0.5 * width * length * height
+    elif shape_code == 4:  # vertical cylinder
+        r = length / 2.0
+        envelope_area = (2 * math.pi * r * height) + (math.pi * (r ** 2))
+        volume = math.pi * (r ** 2) * height
+    else:  # half-cylinder / quonset hut
+        r = width / 2.0
+        envelope_area = (math.pi * r * length) + (math.pi * (r ** 2))
+        volume = 0.5 * math.pi * (r ** 2) * length
+    return envelope_area, volume
+
+
+def diurnal_outside_temp(hour, daily_mean, daily_amplitude, rng):
+    # Warmest around 14:00, coldest around 02:00 -- matches typical Ladakh
+    # winter behaviour where daytime solar warms the air, then it drops
+    # sharply after sunset.
+    base = daily_mean + daily_amplitude * math.cos(2 * math.pi * (hour - 14) / 24)
+    noise = rng.uniform(-1.5, 1.5)
+    return base + noise
+
+
+def diurnal_solar_power(hour, daily_peak_solar, rng):
+    if 6 <= hour <= 18:
+        shape = math.sin(math.pi * (hour - 6) / 12)
+        cloud_factor = rng.uniform(0.75, 1.0)  # mild variability, Ladakh is mostly clear-sky
+        return max(0.0, daily_peak_solar * shape * cloud_factor)
+    return 0.0
+
+
+def build_dataset():
+    print("Sampling input space with Latin Hypercube Sampling...")
+    static_df = sample_inputs(N_SHELTERS)
+
+    rows = []
+    rng = random.Random(42)
+
+    print(f"Simulating {N_SHELTERS} shelters x {HOURS} hours (diurnal physics)...")
+    for i in range(N_SHELTERS):
+        row = static_df.iloc[i]
+        shape_code = rng.choice([1, 2, 3, 4, 5])
+        occupants = rng.randint(0, 15)
+
+        length, width, height = row["length"], row["width"], row["height"]
+        r_value = row["r_value"]
+        thermal_mass_factor = row["thermal_mass_factor"]
+        window_area = min(row["window_area"], 0.6 * length * width)  # can't exceed a sane fraction of floor area
+        window_u_value = row["window_u_value"]
+        orientation_factor = row["orientation_factor"]
+        ach = row["ach"]
+        daily_mean_temp = row["daily_mean_temp"]
+        daily_amplitude = row["daily_amplitude"]
+        daily_peak_solar = row["daily_peak_solar"]
+
+        envelope_area, volume = shape_geometry(shape_code, length, width, height)
+        shape_factor = envelope_area / volume
+
+        c_wall = thermal_mass_factor * envelope_area          # J/K
+        c_air = volume * AIR_VOLUMETRIC_HEAT_CAPACITY          # J/K
+        c_total = c_wall + c_air
+
+        current_inside_temp = rng.uniform(daily_mean_temp - 2, daily_mean_temp + 8)
+
+        for hour in range(HOURS):
+            outside_temp = diurnal_outside_temp(hour, daily_mean_temp, daily_amplitude, rng)
+            solar_power = diurnal_solar_power(hour, daily_peak_solar, rng)
+            wind_speed = rng.uniform(0, 20)
+            wind_multiplier = 1 + (wind_speed * 0.05)
+
+            solar_gain = solar_power * window_area * SOLAR_TRANSMITTANCE * orientation_factor
+            internal_heat = occupants * 100.0
+
+            wall_conduction_loss = (1 / r_value) * (envelope_area - window_area) * \
+                (current_inside_temp - outside_temp) * wind_multiplier
+            window_conduction_loss = window_u_value * window_area * \
+                (current_inside_temp - outside_temp) * wind_multiplier
+            conduction_loss = wall_conduction_loss + window_conduction_loss
+
+            infiltration_loss = ach * volume * INFILTRATION_COEFFICIENT * \
+                (current_inside_temp - outside_temp)
+
+            net_heat = solar_gain + internal_heat - conduction_loss - infiltration_loss
+            raw_temp_change = (net_heat * 3600) / c_total
+            temp_change = max(-MAX_HOURLY_TEMP_CHANGE, min(MAX_HOURLY_TEMP_CHANGE, raw_temp_change))
+            next_inside_temp = current_inside_temp + temp_change
+            next_inside_temp = max(-35.0, min(50.0, next_inside_temp))
+
+            rows.append([
+                shape_code, length, width, height, shape_factor,
+                r_value, thermal_mass_factor, window_area, window_u_value,
+                orientation_factor, ach, occupants,
+                outside_temp, solar_power, wind_speed, current_inside_temp,
+                next_inside_temp, solar_gain, conduction_loss, infiltration_loss,
+            ])
+
+            current_inside_temp = next_inside_temp
+
+        if (i + 1) % 400 == 0:
+            print(f"  ...{i + 1}/{N_SHELTERS} shelters simulated")
+
+    columns = [
+        "Shape_Code", "Length", "Width", "Height", "Shape_Factor",
+        "R_Value", "Thermal_Mass_Factor", "Window_Area", "Window_U_Value",
+        "Orientation_Factor", "ACH", "Occupants",
+        "Outside_Temp", "Solar_Power", "Wind_Speed", "Previous_Temp",
+        "Inside_Temp", "Solar_Gain", "Conduction_Loss", "Infiltration_Loss",
+    ]
+    return pd.DataFrame(rows, columns=columns)
+
+
+if __name__ == "__main__":
+    df = build_dataset()
+    df.to_csv("training_data.csv", index=False)
+    print(f"Dataset created successfully: {len(df)} rows -> training_data.csv")
+
+    # Quick sanity check that the diurnal fix actually worked
+    check = df.groupby(df.index % 24)[["Outside_Temp", "Solar_Power"]].mean()
+    print("\nSanity check -- mean value by hour-of-day (should show a clear diurnal shape):")
+    print(f"  Hour 2  (should be coldest, ~0 solar):  Outside_Temp={check.loc[2, 'Outside_Temp']:.1f}  Solar={check.loc[2, 'Solar_Power']:.1f}")
+    print(f"  Hour 14 (should be warmest, peak solar): Outside_Temp={check.loc[14, 'Outside_Temp']:.1f}  Solar={check.loc[14, 'Solar_Power']:.1f}")
