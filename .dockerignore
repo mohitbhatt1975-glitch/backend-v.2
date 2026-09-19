@@ -1,0 +1,12 @@
+venv/
+__pycache__/
+*.pyc
+.git/
+.gitignore
+
+# Regenerable from generate_data.py with a fixed seed; 15 MB of build weight
+# that the running service never reads.
+training_data.csv
+generate_data.py
+train_model.py
+README.md
