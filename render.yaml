@@ -1,0 +1,8 @@
+# Render blueprint. Connect the repo at dashboard.render.com and it picks this up.
+services:
+  - type: web
+    name: ladakh-shelter-simulator
+    runtime: docker
+    plan: free
+    healthCheckPath: /health
+    autoDeploy: true

@@ -1,0 +1,753 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ladakh Shelter Thermal Simulator</title>
+<style>
+  :root {
+    color-scheme: light;
+    /* brand */
+    --brand-deep: #10243f;
+    --brand-mid:  #1c4270;
+    --brand-lift: #2a78d6;
+    --accent:     #2a78d6;
+    --accent-hi:  #1f63b4;
+    --accent-ink: #ffffff;
+    /* page */
+    --page-bg:    #e8edf4;
+    --page-bg-2:  #dfe6f0;
+    --surface-1:  #fcfcfb;   /* chart surface - palette validated against this */
+    --surface-2:  #f1f3f7;
+    --surface-3:  #e7ebf2;
+    --border:     #d3dae5;
+    --border-soft:#e2e7ef;
+    --grid:       #e6e5df;
+    --text-primary:   #101828;
+    --text-secondary: #4a5568;
+    --text-muted:     #78849a;
+    /* series - validated categorical slots 1-3 */
+    --series-1: #2a78d6;
+    --series-2: #eb6834;
+    --series-3: #1baf7a;
+    /* status */
+    --good-bg:#e7f6ef; --good-bd:#1baf7a; --good-fg:#0f6b4a;
+    --warn-bg:#fdf3e2; --warn-bd:#eda100; --warn-fg:#7a5400;
+    --bad-bg: #fdecec; --bad-bd: #e34948; --bad-fg: #96201f;
+    --shadow-sm: 0 1px 2px rgba(16,32,58,.06), 0 1px 3px rgba(16,32,58,.05);
+    --shadow-md: 0 4px 12px rgba(16,32,58,.08), 0 2px 4px rgba(16,32,58,.04);
+    --radius: 12px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) {
+      color-scheme: dark;
+      --brand-deep: #0b1725;
+      --brand-mid:  #14304f;
+      --brand-lift: #3987e5;
+      --accent:     #3987e5;
+      --accent-hi:  #4f96ea;
+      --page-bg:    #0e1116;
+      --page-bg-2:  #0b0e12;
+      --surface-1:  #1a1a19;
+      --surface-2:  #1f242c;
+      --surface-3:  #262c36;
+      --border:     #333b47;
+      --border-soft:#2a313b;
+      --grid:       #2e2e2c;
+      --text-primary:   #f2f5f9;
+      --text-secondary: #c3c2b7;
+      --text-muted:     #8b95a5;
+      --series-1: #3987e5;
+      --series-2: #d95926;
+      --series-3: #199e70;
+      --good-bg:#12291f; --good-bd:#199e70; --good-fg:#69d2ab;
+      --warn-bg:#2b2416; --warn-bd:#c98500; --warn-fg:#e7b451;
+      --bad-bg: #2c1b1b; --bad-bd: #e66767; --bad-fg: #f09b9b;
+      --shadow-sm: 0 1px 2px rgba(0,0,0,.4);
+      --shadow-md: 0 6px 18px rgba(0,0,0,.45);
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --brand-deep: #0b1725; --brand-mid: #14304f; --brand-lift: #3987e5;
+    --accent: #3987e5; --accent-hi: #4f96ea;
+    --page-bg: #0e1116; --page-bg-2: #0b0e12;
+    --surface-1: #1a1a19; --surface-2: #1f242c; --surface-3: #262c36;
+    --border: #333b47; --border-soft: #2a313b; --grid: #2e2e2c;
+    --text-primary: #f2f5f9; --text-secondary: #c3c2b7; --text-muted: #8b95a5;
+    --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70;
+    --good-bg:#12291f; --good-bd:#199e70; --good-fg:#69d2ab;
+    --warn-bg:#2b2416; --warn-bd:#c98500; --warn-fg:#e7b451;
+    --bad-bg: #2c1b1b; --bad-bd: #e66767; --bad-fg: #f09b9b;
+    --shadow-sm: 0 1px 2px rgba(0,0,0,.4);
+    --shadow-md: 0 6px 18px rgba(0,0,0,.45);
+  }
+
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0; min-height: 100vh;
+    background: linear-gradient(170deg, var(--page-bg) 0%, var(--page-bg-2) 100%);
+    background-attachment: fixed;
+    color: var(--text-primary);
+    font: 15px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* ---------- header ---------- */
+  header {
+    background: linear-gradient(115deg, var(--brand-deep) 0%, var(--brand-mid) 62%, var(--brand-lift) 160%);
+    color: #fff; padding: 20px 16px 22px; position: relative; overflow: hidden;
+  }
+  header::after {
+    content: ""; position: absolute; inset: 0;
+    background: radial-gradient(900px 300px at 82% -40%, rgba(255,255,255,.16), transparent 70%);
+    pointer-events: none;
+  }
+  .header-inner {
+    max-width: 1280px; margin: 0 auto; display: flex;
+    align-items: center; gap: 18px; flex-wrap: wrap; position: relative; z-index: 1;
+  }
+  .mark {
+    width: 42px; height: 42px; border-radius: 11px; flex: none;
+    background: rgba(255,255,255,.14); border: 1px solid rgba(255,255,255,.22);
+    display: grid; place-items: center;
+  }
+  h1 { font-size: 20px; margin: 0; letter-spacing: -0.015em; font-weight: 680; }
+  .sub { font-size: 13px; margin: 3px 0 0; color: rgba(255,255,255,.76); }
+  .spacer { flex: 1; }
+  .pill {
+    font-size: 11px; font-weight: 640; letter-spacing: .07em; text-transform: uppercase;
+    background: rgba(255,255,255,.15); border: 1px solid rgba(255,255,255,.24);
+    padding: 5px 10px; border-radius: 999px; color: #fff;
+  }
+  .icon-btn {
+    background: rgba(255,255,255,.12); color: #fff; border: 1px solid rgba(255,255,255,.22);
+    border-radius: 9px; padding: 8px 13px; font-size: 13px; cursor: pointer;
+    transition: background .15s, transform .15s;
+  }
+  .icon-btn:hover { background: rgba(255,255,255,.22); transform: translateY(-1px); }
+
+  /* ---------- layout ---------- */
+  main {
+    max-width: 1280px; margin: 0 auto; padding: 22px 16px 60px;
+    display: grid; grid-template-columns: 348px minmax(0, 1fr); gap: 22px; align-items: start;
+  }
+  @media (max-width: 960px) { main { grid-template-columns: 1fr; } }
+
+  .card {
+    background: var(--surface-1); border: 1px solid var(--border);
+    border-radius: var(--radius); box-shadow: var(--shadow-sm);
+  }
+  .controls { position: sticky; top: 16px; padding: 4px; }
+  @media (max-width: 960px) { .controls { position: static; } }
+
+  /* ---------- presets ---------- */
+  .preset-bar { padding: 14px 14px 4px; }
+  .preset-bar .lbl {
+    font-size: 11px; font-weight: 650; letter-spacing: .07em; text-transform: uppercase;
+    color: var(--text-muted); margin-bottom: 8px;
+  }
+  .presets { display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px; }
+  .preset {
+    background: var(--surface-2); border: 1px solid var(--border);
+    border-radius: 9px; padding: 8px 6px; cursor: pointer; text-align: center;
+    font-size: 11.5px; font-weight: 580; color: var(--text-secondary);
+    transition: all .16s;
+  }
+  .preset:hover { border-color: var(--accent); color: var(--accent); transform: translateY(-1px); }
+
+  /* ---------- fieldsets ---------- */
+  form { padding: 4px 14px 16px; }
+  fieldset { border: 0; padding: 0; margin: 18px 0 0; }
+  legend {
+    font-size: 11px; font-weight: 680; letter-spacing: .08em; text-transform: uppercase;
+    color: var(--text-secondary); padding: 0 0 9px; display: flex; align-items: center; gap: 7px;
+  }
+  legend::before {
+    content: ""; width: 3px; height: 13px; border-radius: 2px; background: var(--accent);
+  }
+  .field { margin-bottom: 13px; }
+  .field-head { display: flex; align-items: baseline; gap: 6px; margin-bottom: 5px; }
+  .field label { font-size: 13px; color: var(--text-secondary); }
+  .field .val {
+    margin-left: auto; font-size: 13px; font-weight: 650;
+    font-variant-numeric: tabular-nums; color: var(--text-primary);
+    background: var(--surface-3); padding: 1px 7px; border-radius: 6px;
+  }
+  .val.flash { animation: flash .5s ease; }
+  @keyframes flash {
+    0% { background: var(--accent); color: #fff; }
+    100% { background: var(--surface-3); }
+  }
+
+  /* info popover */
+  .info {
+    width: 15px; height: 15px; border-radius: 50%; flex: none; cursor: help;
+    border: 1px solid var(--border); background: var(--surface-3); color: var(--text-muted);
+    font-size: 10px; font-weight: 700; line-height: 1; padding: 0;
+    display: inline-grid; place-items: center; position: relative;
+  }
+  .info:hover, .info:focus-visible { background: var(--accent); color: #fff; border-color: var(--accent); outline: none; }
+  .info[data-tip]:hover::after, .info[data-tip]:focus-visible::after {
+    content: attr(data-tip); position: absolute; left: 50%; top: calc(100% + 8px);
+    transform: translateX(-50%); width: 236px; z-index: 40;
+    background: var(--text-primary); color: var(--page-bg);
+    font-size: 11.5px; font-weight: 450; line-height: 1.45; letter-spacing: 0;
+    text-transform: none; padding: 9px 11px; border-radius: 8px;
+    box-shadow: var(--shadow-md); pointer-events: none;
+  }
+
+  input[type="range"] { width: 100%; accent-color: var(--accent); margin: 0; height: 18px; }
+  input[type="number"] {
+    width: 100%; padding: 8px 10px; font-size: 14px; font-variant-numeric: tabular-nums;
+    color: var(--text-primary); background: var(--surface-2);
+    border: 1px solid var(--border); border-radius: 8px; transition: border-color .15s;
+  }
+  input[type="number"]:focus, input[type="date"]:focus { outline: none; border-color: var(--accent); }
+  .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+
+  /* shape picker */
+  .shapes { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; }
+  .shape {
+    background: var(--surface-2); border: 1px solid var(--border); border-radius: 9px;
+    padding: 8px 2px 6px; cursor: pointer; text-align: center; transition: all .16s;
+  }
+  .shape svg { display: block; margin: 0 auto 4px; }
+  .shape span { font-size: 9.5px; color: var(--text-muted); line-height: 1.2; display: block; }
+  .shape:hover { border-color: var(--accent); transform: translateY(-1px); }
+  .shape[aria-pressed="true"] {
+    border-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, var(--surface-2));
+    box-shadow: 0 0 0 1px var(--accent) inset;
+  }
+  .shape[aria-pressed="true"] span { color: var(--accent); font-weight: 640; }
+  .shape[aria-pressed="true"] svg { stroke: var(--accent); }
+
+  .run-btn {
+    width: 100%; margin-top: 18px; padding: 12px; font-size: 15px; font-weight: 640;
+    color: var(--accent-ink); background: linear-gradient(180deg, var(--accent), var(--accent-hi));
+    border: 0; border-radius: 10px; cursor: pointer; box-shadow: var(--shadow-sm);
+    transition: transform .15s, box-shadow .15s, opacity .15s;
+  }
+  .run-btn:hover:not(:disabled) { transform: translateY(-1px); box-shadow: var(--shadow-md); }
+  .run-btn:disabled { opacity: .62; cursor: progress; }
+  .hint { font-size: 12px; color: var(--text-muted); margin: 9px 0 0; text-align: center; }
+
+  /* ---------- results ---------- */
+  .fade-in { animation: fadeUp .34s cubic-bezier(.22,.8,.3,1) both; }
+  @keyframes fadeUp { from { opacity: 0; transform: translateY(9px); } to { opacity: 1; transform: none; } }
+
+  .banner {
+    border-radius: 10px; padding: 11px 14px; font-size: 13px; line-height: 1.5;
+    margin-bottom: 16px; border: 1px solid var(--border);
+    background: var(--surface-1); color: var(--text-secondary); box-shadow: var(--shadow-sm);
+    border-left-width: 4px;
+  }
+  .banner.good { background: var(--good-bg); border-color: var(--border-soft); border-left-color: var(--good-bd); }
+  .banner.warn { background: var(--warn-bg); border-color: var(--border-soft); border-left-color: var(--warn-bd); }
+  .banner.bad  { background: var(--bad-bg);  border-color: var(--border-soft); border-left-color: var(--bad-bd); }
+  .banner strong { color: var(--text-primary); }
+
+  .tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 20px; }
+  @media (max-width: 1150px) { .tiles { grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 560px)  { .tiles { grid-template-columns: 1fr; } }
+  .tile {
+    background: var(--surface-1); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 14px 15px; box-shadow: var(--shadow-sm); position: relative; overflow: hidden;
+    transition: transform .16s, box-shadow .16s;
+  }
+  .tile:hover { transform: translateY(-2px); box-shadow: var(--shadow-md); }
+  .tile::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--accent); }
+  .tile.t2::before { background: var(--series-2); }
+  .tile.t3::before { background: var(--series-3); }
+  .tile .k { font-size: 10.5px; letter-spacing: .07em; text-transform: uppercase; color: var(--text-muted); font-weight: 620; }
+  .tile .v { font-size: 26px; font-weight: 680; margin-top: 6px; font-variant-numeric: tabular-nums; letter-spacing: -.025em; }
+  .tile .u { font-size: 13px; font-weight: 500; color: var(--text-secondary); margin-left: 3px; }
+
+  .chart-card { padding: 17px 18px 15px; margin-bottom: 18px; }
+  .surrogate {
+    display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+    font-size: 12.5px; color: var(--text-secondary);
+    background: var(--surface-2); border: 1px solid var(--border-soft);
+    border-radius: 9px; padding: 9px 13px; margin-bottom: 18px;
+  }
+  .surrogate b { color: var(--text-primary); font-variant-numeric: tabular-nums; }
+  .surrogate .tag {
+    font-size: 10px; font-weight: 680; letter-spacing: .07em; text-transform: uppercase;
+    color: var(--accent); background: color-mix(in srgb, var(--accent) 13%, transparent);
+    padding: 2px 7px; border-radius: 5px;
+  }
+  .chart-title { font-size: 15.5px; font-weight: 660; margin: 0; letter-spacing: -.01em; }
+  .chart-note { font-size: 12.5px; color: var(--text-secondary); margin: 5px 0 13px; }
+  .legend { display: flex; gap: 15px; flex-wrap: wrap; margin-bottom: 9px; }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--text-secondary); }
+  .swatch { width: 11px; height: 11px; border-radius: 3px; flex: none; }
+
+  .chart-wrap { position: relative; }
+  .chart-wrap svg { display: block; width: 100%; height: auto; }
+  .tooltip {
+    position: absolute; pointer-events: none; opacity: 0; transition: opacity .1s;
+    background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px;
+    padding: 9px 11px; font-size: 12.5px; min-width: 146px;
+    box-shadow: var(--shadow-md); z-index: 5;
+  }
+  .tooltip .t-hour { font-weight: 660; margin-bottom: 6px; color: var(--text-primary); }
+  .tooltip .t-row { display: flex; align-items: center; gap: 7px; margin-top: 4px; color: var(--text-secondary); }
+  .tooltip .t-val { margin-left: auto; font-variant-numeric: tabular-nums; color: var(--text-primary); font-weight: 640; }
+
+  table { border-collapse: collapse; width: 100%; font-size: 12.5px; font-variant-numeric: tabular-nums; margin-top: 8px; }
+  th, td { text-align: right; padding: 6px 9px; border-bottom: 1px solid var(--border-soft); }
+  th:first-child, td:first-child { text-align: left; }
+  th { color: var(--text-muted); font-weight: 620; font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em; }
+  tbody tr:hover { background: var(--surface-2); }
+  details { margin-top: 10px; border-top: 1px solid var(--border-soft); }
+  summary { cursor: pointer; font-size: 12.5px; color: var(--accent); padding: 9px 0 3px; font-weight: 560; }
+
+  .empty {
+    padding: 74px 24px; text-align: center; color: var(--text-muted); font-size: 14px;
+    background: var(--surface-1); border: 1px dashed var(--border); border-radius: var(--radius);
+  }
+  .empty svg { display: block; margin: 0 auto 14px; opacity: .5; }
+  .spinner {
+    width: 26px; height: 26px; border-radius: 50%; margin: 0 auto 14px;
+    border: 2.5px solid var(--border); border-top-color: var(--accent);
+    animation: spin .8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="header-inner">
+    <div class="mark">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.8" stroke-linejoin="round">
+        <path d="M3 11.5 12 4l9 7.5"/><path d="M5.5 10v9h13v-9"/><path d="M10 19v-5h4v5"/>
+      </svg>
+    </div>
+    <div>
+      <h1>Ladakh Shelter Thermal Simulator</h1>
+      <p class="sub">Physics-informed ML surrogate for high-altitude shelter design</p>
+    </div>
+    <div class="spacer"></div>
+    <span class="pill">Smart India Hackathon</span>
+    <button class="icon-btn" id="themeBtn" type="button">Theme</button>
+  </div>
+</header>
+
+<main>
+  <div class="card controls">
+    <div class="preset-bar">
+      <div class="lbl">Quick presets</div>
+      <div class="presets">
+        <button class="preset" type="button" data-preset="tent">Canvas tent</button>
+        <button class="preset" type="button" data-preset="mud">Mud brick</button>
+        <button class="preset" type="button" data-preset="panel">Insulated</button>
+      </div>
+    </div>
+
+    <form id="cfgForm">
+      <fieldset>
+        <legend>Location</legend>
+        <div class="pair">
+          <div class="field">
+            <div class="field-head"><label for="lat">Latitude</label>
+              <button class="info" type="button" data-tip="Where the shelter stands. Drives the live NASA POWER weather the simulation runs against. 34.15 is Leh, Ladakh.">i</button>
+            </div>
+            <input type="number" id="lat" value="34.15" step="0.01" min="-90" max="90" required>
+          </div>
+          <div class="field">
+            <div class="field-head"><label for="lon">Longitude</label></div>
+            <input type="number" id="lon" value="77.58" step="0.01" min="-180" max="180" required>
+          </div>
+        </div>
+        <div class="field">
+          <div class="field-head"><label for="sim_date">Weather date</label>
+            <button class="info" type="button" data-tip="Defaults to mid-January, the conditions this project exists for. Clear the field to use the most recent day NASA has complete data for — which in autumn flatters a poor shelter, because the outside air is already near comfort.">i</button>
+          </div>
+          <input type="date" id="sim_date" value="2026-01-15">
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Geometry</legend>
+        <div class="field">
+          <div class="field-head"><label>Shape</label>
+            <button class="info" type="button" data-tip="Sets the envelope-area-to-volume ratio. More surface per unit of volume means more area to lose heat through, so shape alone changes performance.">i</button>
+          </div>
+          <div class="shapes" id="shapes" role="group" aria-label="Shelter shape"></div>
+          <input type="hidden" id="shape_code" value="1">
+        </div>
+        <div class="field" data-slider data-unit=" m" data-dp="1">
+          <div class="field-head"><label for="length">Length</label><span class="val"></span></div>
+          <input type="range" id="length" min="3" max="15" step="0.1" value="6">
+        </div>
+        <div class="field" data-slider data-unit=" m" data-dp="1">
+          <div class="field-head"><label for="width">Width</label><span class="val"></span></div>
+          <input type="range" id="width" min="3" max="15" step="0.1" value="4.5">
+        </div>
+        <div class="field" data-slider data-unit=" m" data-dp="1">
+          <div class="field-head"><label for="height">Height</label><span class="val"></span></div>
+          <input type="range" id="height" min="2" max="6" step="0.1" value="2.8">
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Envelope</legend>
+        <div class="field" data-slider data-unit=" m²K/W" data-dp="2">
+          <div class="field-head"><label for="r_value">Wall R-value</label>
+            <button class="info" type="button" data-tip="Resistance to heat flowing through the wall. Higher is better insulated. Canvas ≈ 0.05, mud brick ≈ 0.5, a thick insulated panel ≈ 3.0.">i</button>
+            <span class="val"></span>
+          </div>
+          <input type="range" id="r_value" min="0.05" max="4" step="0.05" value="1.8">
+        </div>
+        <div class="field" data-slider data-unit=" kJ/m²K" data-dp="0" data-scale="0.001">
+          <div class="field-head"><label for="thermal_mass_factor">Thermal mass</label>
+            <button class="info" type="button" data-tip="Heat the structure itself can store per m² of wall. High mass (stone, mud brick) soaks up daytime heat and releases it at night, flattening the indoor swing.">i</button>
+            <span class="val"></span>
+          </div>
+          <input type="range" id="thermal_mass_factor" min="500" max="700000" step="500" value="180000">
+        </div>
+        <div class="field" data-slider data-unit=" m²" data-dp="1">
+          <div class="field-head"><label for="window_area">Window area</label>
+            <button class="info" type="button" data-tip="Total glazing area. A trade-off: windows let free solar heat in by day and leak heat out all night.">i</button>
+            <span class="val"></span>
+          </div>
+          <input type="range" id="window_area" min="0" max="15" step="0.1" value="3">
+        </div>
+        <div class="field" data-slider data-unit=" W/m²K" data-dp="1">
+          <div class="field-head"><label for="window_u_value">Window U-value</label>
+            <button class="info" type="button" data-tip="Heat lost through 1 m² of glazing per °C of difference — the inverse of R-value. LOWER is better. Single pane ≈ 5.8, double ≈ 2.8, triple ≈ 1.0.">i</button>
+            <span class="val"></span>
+          </div>
+          <input type="range" id="window_u_value" min="0.5" max="7" step="0.1" value="2.8">
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Siting &amp; use</legend>
+        <div class="field" data-slider data-unit="" data-dp="2">
+          <div class="field-head"><label for="orientation_factor">Solar orientation</label>
+            <button class="info" type="button" data-tip="How well the window wall faces the sun. 1.0 = optimally south-facing for Ladakh; 0.3 = north-facing or shaded by terrain. Scales solar gain directly — the cheapest design lever there is.">i</button>
+            <span class="val"></span>
+          </div>
+          <input type="range" id="orientation_factor" min="0.3" max="1" step="0.01" value="0.9">
+        </div>
+        <div class="field" data-slider data-unit=" ACH" data-dp="1">
+          <div class="field-head"><label for="ach">Air changes / hr</label>
+            <button class="info" type="button" data-tip="How many times per hour ALL the inside air is replaced by outside air through gaps, doors and vents. 0.3 = tightly sealed, 5 = leaky tent. In cold climates this often beats insulation as the biggest loss.">i</button>
+            <span class="val"></span>
+          </div>
+          <input type="range" id="ach" min="0.2" max="6" step="0.1" value="1">
+        </div>
+        <div class="field" data-slider data-unit="" data-dp="0">
+          <div class="field-head"><label for="occupants">Occupants</label>
+            <button class="info" type="button" data-tip="Each person contributes roughly 100 W of body heat — a real and often overlooked heat source in a small shelter.">i</button>
+            <span class="val"></span>
+          </div>
+          <input type="range" id="occupants" min="0" max="30" step="1" value="4">
+        </div>
+        <div class="field" data-slider data-unit=" °C" data-dp="1">
+          <div class="field-head"><label for="initial_temp">Starting indoor temp</label>
+            <button class="info" type="button" data-tip="Indoor temperature the 24-hour simulation begins from at 00:00.">i</button>
+            <span class="val"></span>
+          </div>
+          <input type="range" id="initial_temp" min="-35" max="50" step="0.5" value="10">
+        </div>
+      </fieldset>
+
+      <button class="run-btn" id="runBtn" type="submit">Run simulation</button>
+      <p class="hint">Weather pulled live from NASA POWER</p>
+    </form>
+  </div>
+
+  <section id="results" aria-live="polite">
+    <div class="empty">
+      <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
+        <path d="M3 17l5-6 4 4 5-8 4 5"/>
+      </svg>
+      Set your shelter parameters and run the simulation<br>to see its 24-hour thermal response.
+    </div>
+  </section>
+</main>
+
+<script>
+(function () {
+  "use strict";
+  var root = document.documentElement, lastData = null;
+
+  /* ---------- shape picker ---------- */
+  var SHAPES = [
+    { c: 1, n: "Box",      d: '<path d="M4 18V8l8-4 8 4v10z"/><path d="M4 8l8 4 8-4M12 12v10" opacity=".45"/>' },
+    { c: 2, n: "Dome",     d: '<path d="M3 18a9 9 0 0118 0z"/>' },
+    { c: 3, n: "A-frame",  d: '<path d="M12 4L3 19h18z"/>' },
+    { c: 4, n: "Cylinder", d: '<ellipse cx="12" cy="7" rx="7" ry="3"/><path d="M5 7v10a7 3 0 0014 0V7"/>' },
+    { c: 5, n: "Quonset",  d: '<path d="M3 19V12a9 7 0 0118 0v7z"/>' }
+  ];
+  var shapesEl = document.getElementById("shapes"), shapeInput = document.getElementById("shape_code");
+  SHAPES.forEach(function (s) {
+    var b = document.createElement("button");
+    b.type = "button"; b.className = "shape"; b.dataset.code = s.c;
+    b.setAttribute("aria-pressed", s.c === 1 ? "true" : "false");
+    b.innerHTML = '<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+                  'stroke-width="1.5" stroke-linejoin="round" style="color:var(--text-muted)">' + s.d +
+                  '</svg><span>' + s.n + "</span>";
+    b.addEventListener("click", function () {
+      shapesEl.querySelectorAll(".shape").forEach(function (x) { x.setAttribute("aria-pressed", "false"); });
+      b.setAttribute("aria-pressed", "true");
+      shapeInput.value = s.c;
+    });
+    shapesEl.appendChild(b);
+  });
+
+  /* ---------- sliders ---------- */
+  var fields = [].slice.call(document.querySelectorAll("[data-slider]"));
+  function syncField(f, flash) {
+    var input = f.querySelector("input"), out = f.querySelector(".val");
+    var dp = +f.dataset.dp, unit = f.dataset.unit || "", scale = +(f.dataset.scale || 1);
+    out.textContent = (input.value * scale).toFixed(dp) + unit;
+    if (flash) { out.classList.remove("flash"); void out.offsetWidth; out.classList.add("flash"); }
+  }
+  fields.forEach(function (f) {
+    f.querySelector("input").addEventListener("input", function () { syncField(f, false); });
+    syncField(f, false);
+  });
+
+  /* ---------- presets ---------- */
+  var PRESETS = {
+    tent:  { r_value: .1,  thermal_mass_factor: 2000,   window_area: 1,   window_u_value: 5.8, orientation_factor: .5,  ach: 4,  shape: 3 },
+    mud:   { r_value: .6,  thermal_mass_factor: 400000, window_area: 2,   window_u_value: 2.8, orientation_factor: .8,  ach: 2,  shape: 1 },
+    panel: { r_value: 3,   thermal_mass_factor: 30000,  window_area: 3.5, window_u_value: 1.2, orientation_factor: .95, ach: .6, shape: 1 }
+  };
+  document.querySelectorAll(".preset").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var p = PRESETS[btn.dataset.preset];
+      Object.keys(p).forEach(function (k) {
+        if (k === "shape") {
+          shapesEl.querySelector('[data-code="' + p.shape + '"]').click();
+          return;
+        }
+        var input = document.getElementById(k);
+        if (!input) return;
+        input.value = p[k];
+        syncField(input.closest("[data-slider]"), true);
+      });
+    });
+  });
+
+  /* ---------- theme ---------- */
+  document.getElementById("themeBtn").addEventListener("click", function () {
+    var dark = root.getAttribute("data-theme") === "dark" ||
+      (!root.hasAttribute("data-theme") && matchMedia("(prefers-color-scheme: dark)").matches);
+    root.setAttribute("data-theme", dark ? "light" : "dark");
+    if (lastData) render(lastData);
+  });
+
+  /* ---------- chart ---------- */
+  var SVGNS = "http://www.w3.org/2000/svg";
+  function el(n, a) { var e = document.createElementNS(SVGNS, n); for (var k in a) e.setAttribute(k, a[k]); return e; }
+  function cssVar(n) { return getComputedStyle(document.body).getPropertyValue(n).trim(); }
+  function niceTicks(min, max, count) {
+    if (min === max) { min -= 1; max += 1; }
+    var raw = (max - min) / count;
+    var mag = Math.pow(10, Math.floor(Math.log(raw) / Math.LN10));
+    var norm = raw / mag;
+    var step = (norm >= 5 ? 10 : norm >= 2 ? 5 : norm >= 1 ? 2 : 1) * mag;
+    var lo = Math.floor(min / step) * step, hi = Math.ceil(max / step) * step, t = [];
+    for (var v = lo; v <= hi + step / 2; v += step) t.push(+v.toFixed(10));
+    return t;
+  }
+
+  function lineChart(wrap, series, fmt) {
+    wrap.innerHTML = "";
+    var W = 760, H = 296, M = { t: 14, r: 78, b: 30, l: 52 };
+    var iw = W - M.l - M.r, ih = H - M.t - M.b;
+    var all = []; series.forEach(function (s) { all = all.concat(s.values); });
+    var ticks = niceTicks(Math.min.apply(null, all), Math.max.apply(null, all), 5);
+    var yMin = ticks[0], yMax = ticks[ticks.length - 1];
+    var X = function (i) { return M.l + (i / 23) * iw; };
+    var Y = function (v) { return M.t + ih - ((v - yMin) / (yMax - yMin)) * ih; };
+
+    var svg = el("svg", { viewBox: "0 0 " + W + " " + H, role: "img" });
+    var gridC = cssVar("--grid"), mutedC = cssVar("--text-muted"), surfC = cssVar("--surface-1");
+
+    ticks.forEach(function (t) {
+      svg.appendChild(el("line", { x1: M.l, x2: M.l + iw, y1: Y(t), y2: Y(t), stroke: gridC, "stroke-width": 1 }));
+      var l = el("text", { x: M.l - 10, y: Y(t) + 4, "text-anchor": "end", fill: mutedC, "font-size": 11 });
+      l.textContent = fmt.axis(t); svg.appendChild(l);
+    });
+    if (yMin < 0 && yMax > 0) {
+      svg.appendChild(el("line", { x1: M.l, x2: M.l + iw, y1: Y(0), y2: Y(0),
+        stroke: mutedC, "stroke-width": 1, "stroke-dasharray": "3 3", opacity: .6 }));
+    }
+    for (var h = 0; h <= 23; h += 3) {
+      var xl = el("text", { x: X(h), y: H - 9, "text-anchor": "middle", fill: mutedC, "font-size": 11 });
+      xl.textContent = (h < 10 ? "0" + h : h) + ":00"; svg.appendChild(xl);
+    }
+    series.forEach(function (s) {
+      var d = s.values.map(function (v, i) { return (i ? "L" : "M") + X(i).toFixed(1) + " " + Y(v).toFixed(1); }).join(" ");
+      svg.appendChild(el("path", { d: d, fill: "none", stroke: s.color, "stroke-width": 2,
+        "stroke-linejoin": "round", "stroke-linecap": "round" }));
+    });
+    var ends = series.map(function (s, i) { return { y: Y(s.values[23]), name: s.name, color: s.color }; });
+    ends.sort(function (a, b) { return a.y - b.y; });
+    for (var k = 1; k < ends.length; k++) if (ends[k].y - ends[k - 1].y < 14) ends[k].y = ends[k - 1].y + 14;
+    ends.forEach(function (e) {
+      var t = el("text", { x: M.l + iw + 9, y: e.y + 4, fill: e.color, "font-size": 11.5, "font-weight": 620 });
+      t.textContent = e.name; svg.appendChild(t);
+    });
+
+    var hov = el("line", { y1: M.t, y2: M.t + ih, stroke: mutedC, "stroke-width": 1, opacity: 0 });
+    svg.appendChild(hov);
+    var dots = series.map(function (s) {
+      var c = el("circle", { r: 4.5, fill: s.color, stroke: surfC, "stroke-width": 2, opacity: 0 });
+      svg.appendChild(c); return c;
+    });
+    var ov = el("rect", { x: M.l, y: M.t, width: iw, height: ih, fill: "transparent", style: "cursor:crosshair" });
+    svg.appendChild(ov); wrap.appendChild(svg);
+
+    var tip = document.createElement("div"); tip.className = "tooltip"; wrap.appendChild(tip);
+    ov.addEventListener("mousemove", function (ev) {
+      var r = svg.getBoundingClientRect();
+      var i = Math.max(0, Math.min(23, Math.round(((ev.clientX - r.left) * (W / r.width) - M.l) / iw * 23)));
+      hov.setAttribute("x1", X(i)); hov.setAttribute("x2", X(i)); hov.setAttribute("opacity", .45);
+      series.forEach(function (s, n) {
+        dots[n].setAttribute("cx", X(i)); dots[n].setAttribute("cy", Y(s.values[i])); dots[n].setAttribute("opacity", 1);
+      });
+      var html = '<div class="t-hour">' + (i < 10 ? "0" + i : i) + ":00</div>";
+      series.forEach(function (s) {
+        html += '<div class="t-row"><span class="swatch" style="background:' + s.color + '"></span>' +
+                s.name + '<span class="t-val">' + fmt.tip(s.values[i]) + "</span></div>";
+      });
+      tip.innerHTML = html; tip.style.opacity = 1;
+      var relX = X(i) / W * r.width;
+      tip.style.left = Math.min(Math.max(relX + 14, 4), r.width - tip.offsetWidth - 4) + "px";
+      tip.style.top = "10px";
+    });
+    ov.addEventListener("mouseleave", function () {
+      tip.style.opacity = 0; hov.setAttribute("opacity", 0);
+      dots.forEach(function (d) { d.setAttribute("opacity", 0); });
+    });
+  }
+
+  /* ---------- render ---------- */
+  var results = document.getElementById("results");
+  function tile(k, v, u, cls) {
+    return '<div class="tile ' + (cls || "") + '"><div class="k">' + k + '</div><div class="v">' + v +
+           (u ? '<span class="u">' + u + "</span>" : "") + "</div></div>";
+  }
+  function table(d) {
+    var rows = "";
+    for (var i = 0; i < 24; i++) {
+      rows += "<tr><td>" + (i < 10 ? "0" + i : i) + ":00</td><td>" + d.hourly_outside_temp[i].toFixed(1) +
+        "</td><td>" + d.hourly_inside_temp[i].toFixed(1) + "</td><td>" + Math.round(d.hourly_solar_gain[i]) +
+        "</td><td>" + Math.round(d.hourly_conduction_loss[i]) + "</td><td>" +
+        Math.round(d.hourly_infiltration_loss[i]) + "</td></tr>";
+    }
+    return "<details><summary>Show the 24-hour data table</summary><table><thead><tr><th>Hour</th>" +
+      "<th>Outdoor °C</th><th>Indoor °C</th><th>Solar gain W</th><th>Conduction W</th>" +
+      "<th>Infiltration W</th></tr></thead><tbody>" + rows + "</tbody></table></details>";
+  }
+
+  function render(d) {
+    lastData = d;
+    var t = d.hourly_inside_temp;
+    var minT = Math.min.apply(null, t), maxT = Math.max.apply(null, t);
+    var o = d.hourly_outside_temp;
+    var ds = d.weather_date_used, pretty = ds.slice(6, 8) + "/" + ds.slice(4, 6) + "/" + ds.slice(0, 4);
+
+    var banner = d.weather_is_seasonal_fallback
+      ? '<div class="banner warn"><strong>Seasonal weather: ' + pretty + '.</strong> NASA POWER\'s hourly ' +
+        "solar product lags months behind its temperature data, so this is the most recent fully-populated " +
+        "day for these coordinates — same season, not today's sky.</div>"
+      : '<div class="banner good">Live NASA POWER weather for <strong>' + pretty + "</strong>.</div>";
+
+    var su = d.sustainability, cf = d.comfort || {};
+    var sur = d.surrogate_agreement;
+    var surrogateBadge = sur
+      ? '<div class="surrogate"><span class="tag">ML surrogate</span><span>' +
+        'XGBoost reproduces the physics engine to <b>' + sur.inside_temp_rmse_c +
+        ' &deg;C</b> RMSE over these 24 hours (worst hour <b>' + sur.max_abs_error_c +
+        ' &deg;C</b>). The figures above are the engine itself, not the approximation.</span></div>'
+      : "";
+
+    results.innerHTML = '<div class="fade-in">' + banner +
+      '<div class="tiles">' +
+        tile("Comfort score", d.livability_score, "/100") +
+        tile("Cold degree-hours", cf.comfort_degree_hours, "&deg;C&middot;h", "t2") +
+        tile("Coldest indoor", minT.toFixed(1), "&deg;C", "t2") +
+        tile("Warmest indoor", maxT.toFixed(1), "&deg;C", "t2") +
+        tile("Heating load", su.heating_load_kwh_per_day, "kWh/day", "t3") +
+        tile("Undesigned baseline", su.baseline_load_kwh_per_day, "kWh/day", "t3") +
+        tile("Kerosene saved", su.kerosene_saved_liters, "L/day", "t3") +
+        tile("CO&#8322; prevented", su.co2_emissions_prevented_kg, "kg/day", "t3") +
+      "</div>" + surrogateBadge +
+      '<div class="card chart-card"><h2 class="chart-title">Indoor vs outdoor temperature</h2>' +
+      '<p class="chart-note">The gap between the lines is the shelter doing its job. Indoor peaks hours ' +
+      'after outdoor — that delay is thermal mass.</p>' +
+      '<div class="legend" id="lg1"></div><div class="chart-wrap" id="c1"></div>' + table(d) + "</div>" +
+      '<div class="card chart-card"><h2 class="chart-title">Hourly heat flow</h2>' +
+      '<p class="chart-note">Conduction escapes <em>through</em> walls and glass; infiltration is heat carried ' +
+      'out by air leaking <em>around</em> them. Below zero, the outside air is warmer and heat flows back in.</p>' +
+      '<div class="legend" id="lg2"></div><div class="chart-wrap" id="c2"></div></div></div>';
+
+    var s1 = [
+      { name: "Indoor", color: cssVar("--series-1"), values: d.hourly_inside_temp },
+      { name: "Outdoor", color: cssVar("--series-2"), values: d.hourly_outside_temp }
+    ];
+    var s2 = [
+      { name: "Solar gain", color: cssVar("--series-1"), values: d.hourly_solar_gain },
+      { name: "Conduction", color: cssVar("--series-2"), values: d.hourly_conduction_loss },
+      { name: "Infiltration", color: cssVar("--series-3"), values: d.hourly_infiltration_loss }
+    ];
+    [["lg1", s1], ["lg2", s2]].forEach(function (p) {
+      document.getElementById(p[0]).innerHTML = p[1].map(function (s) {
+        return '<span><span class="swatch" style="background:' + s.color + '"></span>' + s.name + "</span>";
+      }).join("");
+    });
+    lineChart(document.getElementById("c1"), s1, {
+      axis: function (v) { return v.toFixed(0) + "°"; },
+      tip: function (v) { return v.toFixed(1) + " °C"; }
+    });
+    lineChart(document.getElementById("c2"), s2, {
+      axis: function (v) { return Math.abs(v) >= 1000 ? (v / 1000).toFixed(1) + "k" : v.toFixed(0); },
+      tip: function (v) { return Math.round(v).toLocaleString() + " W"; }
+    });
+  }
+
+  /* ---------- submit ---------- */
+  var form = document.getElementById("cfgForm"), btn = document.getElementById("runBtn");
+  form.addEventListener("submit", function (ev) {
+    ev.preventDefault();
+    var ids = ["lat", "lon", "length", "width", "height", "r_value", "thermal_mass_factor",
+               "window_area", "window_u_value", "orientation_factor", "ach", "occupants", "initial_temp"];
+    var body = { shape_code: +shapeInput.value };
+    ids.forEach(function (id) { body[id] = +document.getElementById(id).value; });
+    body.occupants = Math.round(body.occupants);
+    var chosen = document.getElementById("sim_date").value;
+    if (chosen) body.date = chosen;
+
+    btn.disabled = true; btn.textContent = "Simulating…";
+    results.innerHTML = '<div class="empty"><div class="spinner"></div>' +
+      "Fetching NASA weather and running 24 hours through the model…</div>";
+
+    fetch("/simulate", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body)
+    })
+      .then(function (r) {
+        return r.json().then(function (j) {
+          if (!r.ok) throw new Error(typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail));
+          return j;
+        });
+      })
+      .then(render)
+      .catch(function (e) {
+        results.innerHTML = '<div class="banner bad"><strong>Simulation failed.</strong><br>' +
+          String(e.message || e).replace(/</g, "&lt;") + "</div>";
+      })
+      .finally(function () { btn.disabled = false; btn.textContent = "Run simulation"; });
+  });
+})();
+</script>
+</body>
+</html>

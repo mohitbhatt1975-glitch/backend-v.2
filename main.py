@@ -24,7 +24,9 @@ Changes vs the original:
 """
 
 import math
+import time
 from datetime import date, timedelta
+from pathlib import Path
 from typing import List, Optional
 
 import httpx
@@ -32,8 +34,11 @@ import joblib
 import pandas as pd
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+import physics
 from materials_library import MATERIALS, compute_composite_wall
 
 app = FastAPI(title="Ladakh Shelter Thermal Simulator", version="2.0")
@@ -46,8 +51,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+BASE_DIR = Path(__file__).resolve().parent
+STATIC_DIR = BASE_DIR / "static"
+
 # ---- Load the model bundle once at startup ----
-MODEL_PATH = "thermal_model_v4.pkl"
+# Resolved against this file so the server works from any working directory.
+MODEL_PATH = BASE_DIR / "thermal_model_v4.pkl"
 try:
     bundle = joblib.load(MODEL_PATH)
     MODELS = bundle["models"]
@@ -70,6 +79,20 @@ BASELINE_OVERRIDES = {
 KEROSENE_ENERGY_DENSITY_J_PER_L = 35_000_000
 KEROSENE_CO2_KG_PER_L = 2.5
 
+# Comfort band. The v2 score deducted a flat penalty per hour outside it, which
+# made every Ladakh winter shelter score identically (nothing clears 15 C in
+# January, so everything lost the same 36 points). Degree-hours weight each hour
+# by HOW far outside the band it sits, so a shelter holding -9 C separates from
+# one at -22 C.
+COMFORT_MIN_C = 15.0
+COMFORT_MAX_C = 25.0
+COMFORT_SCALE_DEGREE_HOURS = 300.0  # decay constant: 300 degC*h -> ~37/100
+
+# NASA POWER is a public service and its data for a past date never changes,
+# so cache it. Also keeps a demo responsive when judges re-run one location.
+WEATHER_CACHE_TTL_S = 6 * 3600
+_WEATHER_CACHE = {}
+
 
 class ShelterInput(BaseModel):
     lat: float = Field(..., ge=-90, le=90)
@@ -87,6 +110,7 @@ class ShelterInput(BaseModel):
     occupants: int = Field(0, ge=0, le=30)
     initial_temp: float = Field(10.0, ge=-35, le=50)
     date: Optional[str] = Field(None, description="YYYY-MM-DD; defaults to most recent day with complete NASA data")
+    surrogate_check: bool = Field(True, description="also score the ML surrogate against the physics engine")
 
 
 class CompareRequest(BaseModel):
@@ -144,6 +168,11 @@ async def fetch_nasa_weather(lat: float, lon: float, requested_date: Optional[st
     is reported back to the caller, and seasonal fallbacks are flagged rather
     than passed off as current weather.
     """
+    cache_key = (round(lat, 3), round(lon, 3), requested_date or "recent")
+    hit = _WEATHER_CACHE.get(cache_key)
+    if hit and (time.time() - hit[0]) < WEATHER_CACHE_TTL_S:
+        return hit[1]
+
     async with httpx.AsyncClient(timeout=30.0) as client:
         if requested_date:
             ds = requested_date.replace("-", "")
@@ -175,6 +204,7 @@ async def fetch_nasa_weather(lat: float, lon: float, requested_date: Optional[st
                 found = _pick_most_recent_valid_day(_group_hours_by_day(params))
                 if found is not None:
                     found["is_seasonal_fallback"] = is_fallback
+                    _WEATHER_CACHE[cache_key] = (time.time(), found)
                     return found
                 last_error = f"No day with complete, non-fill data in {start_ds}-{end_ds}"
             except (httpx.HTTPError, KeyError, ValueError) as e:
@@ -187,109 +217,180 @@ async def fetch_nasa_weather(lat: float, lon: float, requested_date: Optional[st
         )
 
 
-def predict_hour(features_row: pd.DataFrame) -> dict:
-    return {target: float(model.predict(features_row)[0]) for target, model in MODELS.items()}
+def _geometry(params: dict):
+    """Envelope area, volume and shape factor for a config, via the shared engine."""
+    envelope_area, volume = physics.shape_geometry(
+        params["shape_code"], params["length"], params["width"], params["height"]
+    )
+    return envelope_area, volume, envelope_area / volume
 
 
 def simulate_config(cfg: ShelterInput, weather: dict, overrides: Optional[dict] = None) -> dict:
-    """Run the 24-hour recursive simulation for one shelter config against one weather profile."""
+    """
+    Run the 24-hour simulation for one shelter against one weather profile.
+
+    This evaluates the energy balance in physics.py directly. v2 served the
+    XGBoost surrogate's approximation of it instead, which is where the
+    impossible outputs came from: solar gain going negative at night, indoor air
+    falling below ambient in an occupied shelter, conduction flipping sign at
+    dawn. Those were approximation error, not physics, and they are gone.
+    """
     params = cfg.model_dump()
     if overrides:
         params.update(overrides)
 
+    envelope_area, volume, _ = _geometry(params)
+    capacitance = physics.thermal_capacitance(params["thermal_mass_factor"], envelope_area, volume)
+    window_area = min(params["window_area"], physics.max_window_area(envelope_area))
+
     current_temp = params["initial_temp"]
-    length, width, height = params["length"], params["width"], params["height"]
-    shape_code = params["shape_code"]
-
-    # Recompute shape geometry exactly as generate_data.py does, so Shape_Factor is consistent
-    if shape_code == 1:
-        envelope_area = (2 * length * height) + (2 * width * height) + (length * width)
-    elif shape_code == 2:
-        r = length / 2.0
-        envelope_area = 2 * math.pi * (r ** 2)
-    elif shape_code == 3:
-        slant = math.sqrt((width / 2) ** 2 + height ** 2)
-        envelope_area = (2 * slant * length) + (width * height)
-    elif shape_code == 4:
-        r = length / 2.0
-        envelope_area = (2 * math.pi * r * height) + (math.pi * (r ** 2))
-    else:
-        r = width / 2.0
-        envelope_area = (math.pi * r * length) + (math.pi * (r ** 2))
-
-    if shape_code == 1:
-        volume = length * width * height
-    elif shape_code == 2:
-        r = length / 2.0
-        volume = (2 / 3) * math.pi * (r ** 3)
-    elif shape_code == 3:
-        volume = 0.5 * width * length * height
-    elif shape_code == 4:
-        r = length / 2.0
-        volume = math.pi * (r ** 2) * height
-    else:
-        r = width / 2.0
-        volume = 0.5 * math.pi * (r ** 2) * length
-
-    shape_factor = envelope_area / volume
-
     hourly = {"inside_temp": [], "solar_gain": [], "conduction_loss": [], "infiltration_loss": []}
     required_heater_joules = 0.0
+    previous_temps = []
 
     for hour in range(24):
-        row = pd.DataFrame([[
-            shape_code, length, width, height, shape_factor,
-            params["r_value"], params["thermal_mass_factor"],
-            params["window_area"], params["window_u_value"],
-            params["orientation_factor"], params["ach"], params["occupants"],
-            weather["temps"][hour], weather["solar"][hour], weather["wind"][hour],
-            current_temp,
-        ]], columns=FEATURES)
+        previous_temps.append(current_temp)
+        r = physics.step(
+            current_temp, weather["temps"][hour], weather["solar"][hour], weather["wind"][hour],
+            envelope_area=envelope_area, volume=volume, r_value=params["r_value"],
+            window_area=window_area, window_u_value=params["window_u_value"],
+            orientation_factor=params["orientation_factor"], ach=params["ach"],
+            occupants=params["occupants"], capacitance=capacitance,
+        )
+        hourly["inside_temp"].append(round(r["next_temp"], 2))
+        hourly["solar_gain"].append(round(r["solar_gain"], 1))
+        hourly["conduction_loss"].append(round(r["conduction_loss"], 1))
+        hourly["infiltration_loss"].append(round(r["infiltration_loss"], 1))
 
-        preds = predict_hour(row)
-        next_temp = preds["Inside_Temp"]
-        solar_gain = preds["Solar_Gain"]
-        conduction_loss = preds["Conduction_Loss"]
-        infiltration_loss = preds["Infiltration_Loss"]
+        # Fuel is measured against a held setpoint rather than the floating
+        # temperature -- see physics.heating_load for why the old form read zero.
+        required_heater_joules += physics.heating_load(
+            COMFORT_MIN_C, weather["temps"][hour], weather["solar"][hour], weather["wind"][hour],
+            envelope_area=envelope_area, volume=volume, r_value=params["r_value"],
+            window_area=window_area, window_u_value=params["window_u_value"],
+            orientation_factor=params["orientation_factor"], ach=params["ach"],
+            occupants=params["occupants"],
+        ) * 3600
 
-        hourly["inside_temp"].append(round(next_temp, 2))
-        hourly["solar_gain"].append(round(solar_gain, 1))
-        hourly["conduction_loss"].append(round(conduction_loss, 1))
-        hourly["infiltration_loss"].append(round(infiltration_loss, 1))
-
-        # Heater power actually needed this hour to hold comfort (only counts when losses exceed free gains)
-        internal_heat = params["occupants"] * 100.0
-        net_free_heat = solar_gain + internal_heat - conduction_loss - infiltration_loss
-        heater_needed_watts = max(0.0, -net_free_heat)
-        required_heater_joules += heater_needed_watts * 3600
-
-        current_temp = next_temp
+        current_temp = r["next_temp"]
 
     return {
         "hourly": hourly,
         "required_heater_joules": required_heater_joules,
         "final_temp": current_temp,
+        "previous_temps": previous_temps,
+        "envelope_area": envelope_area,
+        "effective_window_area": window_area,
+    }
+
+
+def surrogate_agreement(cfg: ShelterInput, weather: dict, truth: dict) -> Optional[dict]:
+    """
+    Score the trained XGBoost surrogate against the physics engine it learned from.
+
+    One-step (teacher-forced) comparison: each hour the surrogate is given the
+    physics engine's own indoor temperature and asked for the next one, so the
+    number measures surrogate fidelity rather than compounding drift. This is
+    what the ML half of the project actually demonstrates.
+    """
+    if MODELS is None:
+        return None
+
+    params = cfg.model_dump()
+    envelope_area, volume, shape_factor = _geometry(params)
+    window_area = min(params["window_area"], physics.max_window_area(envelope_area))
+
+    rows = []
+    for hour in range(24):
+        rows.append([
+            params["shape_code"], params["length"], params["width"], params["height"], shape_factor,
+            params["r_value"], params["thermal_mass_factor"], window_area, params["window_u_value"],
+            params["orientation_factor"], params["ach"], params["occupants"],
+            weather["temps"][hour], weather["solar"][hour], weather["wind"][hour],
+            truth["previous_temps"][hour],
+        ])
+    frame = pd.DataFrame(rows, columns=FEATURES)
+
+    predicted = MODELS["Inside_Temp"].predict(frame)
+    actual = truth["hourly"]["inside_temp"]
+    errors = [float(predicted[i]) - actual[i] for i in range(24)]
+    rmse = math.sqrt(sum(e * e for e in errors) / len(errors))
+
+    return {
+        "inside_temp_rmse_c": round(rmse, 3),
+        "max_abs_error_c": round(max(abs(e) for e in errors), 3),
+        "note": "XGBoost surrogate vs the physics engine, one-step teacher-forced over 24 h.",
     }
 
 
 def compute_sustainability(actual_joules: float, baseline_joules: float) -> dict:
+    """
+    Fuel saved against an undesigned reference shelter, both holding COMFORT_MIN_C.
+
+    The absolute loads are reported alongside the saving so the figure can be
+    checked rather than taken on trust. Note what the comparison means: it is the
+    cost of holding 15 C in an uninsulated, leaky shelter, which in a Ladakh
+    January is deliberately punishing. Occupants of such a shelter in practice
+    wear layers and accept a far colder interior -- the baseline is a like-for-
+    like thermal comparison, not a claim about what anyone currently burns.
+    """
     saved_joules = max(0.0, baseline_joules - actual_joules)
     liters_saved = saved_joules / KEROSENE_ENERGY_DENSITY_J_PER_L
     co2_prevented = liters_saved * KEROSENE_CO2_KG_PER_L
     return {
         "kerosene_saved_liters": round(liters_saved, 2),
         "co2_emissions_prevented_kg": round(co2_prevented, 2),
+        "heating_load_kwh_per_day": round(actual_joules / 3_600_000, 1),
+        "baseline_load_kwh_per_day": round(baseline_joules / 3_600_000, 1),
+        "setpoint_c": COMFORT_MIN_C,
+        "basis": "energy to hold the setpoint for 24 h, versus an uninsulated leaky shelter of the same size",
     }
 
 
-def compute_livability(inside_temps: List[float]) -> int:
-    score = 100.0
-    for t in inside_temps:
-        if t < 15.0:
-            score -= 1.5
-        elif t > 25.0:
-            score -= 1.0
-    return max(0, round(score))
+def compute_comfort(inside_temps: List[float]) -> dict:
+    """
+    Comfort as degree-hours outside the band, plus a 0-100 score derived from it.
+
+    Degree-hours is the honest primary number: it is auditable, has units, and
+    keeps discriminating when every option is cold. The score is a monotonic
+    transform of it for presentation, and never saturates.
+    """
+    deficit = sum(max(0.0, COMFORT_MIN_C - t) for t in inside_temps)
+    excess = sum(max(0.0, t - COMFORT_MAX_C) for t in inside_temps)
+    degree_hours = deficit + excess
+    score = 100.0 * math.exp(-degree_hours / COMFORT_SCALE_DEGREE_HOURS)
+    return {
+        "livability_score": int(round(score)),
+        "comfort_degree_hours": round(degree_hours, 1),
+        "cold_degree_hours": round(deficit, 1),
+        "hot_degree_hours": round(excess, 1),
+        "hours_in_band": sum(1 for t in inside_temps if COMFORT_MIN_C <= t <= COMFORT_MAX_C),
+    }
+
+
+def validate_geometry(cfg: ShelterInput) -> None:
+    """
+    Reject configurations that are individually in range but jointly impossible.
+
+    Pydantic checks each field alone, so v2 accepted a 3 m dome (14.1 m^2 of
+    surface) carrying 15 m^2 of glazing -- more glass than the shelter has
+    envelope -- and returned confident numbers for it. Glazing displaces opaque
+    wall, so it cannot exceed a sane fraction of the envelope.
+    """
+    envelope_area, volume = physics.shape_geometry(
+        cfg.shape_code, cfg.length, cfg.width, cfg.height
+    )
+    limit = physics.max_window_area(envelope_area)
+    if cfg.window_area > limit:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"window_area {cfg.window_area:.1f} m^2 exceeds what this shelter can carry. "
+                f"A {cfg.length:.1f}x{cfg.width:.1f}x{cfg.height:.1f} m shape-{cfg.shape_code} "
+                f"envelope is {envelope_area:.1f} m^2, so glazing is capped at {limit:.1f} m^2 "
+                f"(60% of the envelope)."
+            ),
+        )
 
 
 @app.get("/materials")
@@ -313,32 +414,36 @@ def materials_composite(req: CompositeWallRequest):
 
 @app.post("/simulate")
 async def run_simulation(data: ShelterInput):
-    if MODELS is None:
-        raise HTTPException(status_code=503, detail=f"Model not loaded. Run train_model.py to produce {MODEL_PATH}.")
+    validate_geometry(data)
 
     weather = await fetch_nasa_weather(data.lat, data.lon, data.date)
     actual = simulate_config(data, weather)
     baseline = simulate_config(data, weather, overrides=BASELINE_OVERRIDES)
 
     sustainability = compute_sustainability(actual["required_heater_joules"], baseline["required_heater_joules"])
-    livability = compute_livability(actual["hourly"]["inside_temp"])
+    comfort = compute_comfort(actual["hourly"]["inside_temp"])
 
     return {
         "weather_date_used": weather["date_used"],
         "weather_is_seasonal_fallback": weather.get("is_seasonal_fallback", False),
+        "hourly_outside_temp": [round(t, 2) for t in weather["temps"]],
+        "hourly_solar_power": [round(v, 1) for v in weather["solar"]],
         "hourly_inside_temp": actual["hourly"]["inside_temp"],
         "hourly_solar_gain": actual["hourly"]["solar_gain"],
         "hourly_conduction_loss": actual["hourly"]["conduction_loss"],
         "hourly_infiltration_loss": actual["hourly"]["infiltration_loss"],
         "sustainability": sustainability,
-        "livability_score": livability,
+        "livability_score": comfort["livability_score"],
+        "comfort": comfort,
+        "engine": "physics",
+        "surrogate_agreement": surrogate_agreement(data, weather, actual) if data.surrogate_check else None,
     }
 
 
 @app.post("/compare")
 async def compare_configs(req: CompareRequest):
-    if MODELS is None:
-        raise HTTPException(status_code=503, detail=f"Model not loaded. Run train_model.py to produce {MODEL_PATH}.")
+    for cfg in req.configs:
+        validate_geometry(cfg)
 
     first = req.configs[0]
     weather = await fetch_nasa_weather(first.lat, first.lon, first.date)
@@ -349,10 +454,11 @@ async def compare_configs(req: CompareRequest):
         actual = simulate_config(cfg, weather)
         baseline = simulate_config(cfg, weather, overrides=BASELINE_OVERRIDES)
         sustainability = compute_sustainability(actual["required_heater_joules"], baseline["required_heater_joules"])
-        livability = compute_livability(actual["hourly"]["inside_temp"])
+        comfort = compute_comfort(actual["hourly"]["inside_temp"])
         results.append({
             "label": label,
-            "livability_score": livability,
+            "livability_score": comfort["livability_score"],
+            "comfort_degree_hours": comfort["comfort_degree_hours"],
             "kerosene_saved_liters": sustainability["kerosene_saved_liters"],
             "co2_emissions_prevented_kg": sustainability["co2_emissions_prevented_kg"],
             "min_inside_temp": round(min(actual["hourly"]["inside_temp"]), 2),
@@ -360,7 +466,7 @@ async def compare_configs(req: CompareRequest):
             "hourly_inside_temp": actual["hourly"]["inside_temp"],
         })
 
-    ranked = sorted(results, key=lambda r: r["livability_score"], reverse=True)
+    ranked = sorted(results, key=lambda r: r["comfort_degree_hours"])
     return {
         "weather_date_used": weather["date_used"],
         "weather_is_seasonal_fallback": weather.get("is_seasonal_fallback", False),
@@ -370,4 +476,13 @@ async def compare_configs(req: CompareRequest):
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "model_loaded": MODELS is not None}
+    return {"status": "ok", "engine": "physics", "surrogate_loaded": MODELS is not None}
+
+
+@app.get("/", include_in_schema=False)
+def dashboard():
+    """Serve the operator dashboard."""
+    return FileResponse(STATIC_DIR / "index.html")
+
+
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
