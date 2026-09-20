@@ -1,4 +1,4 @@
-# Ladakh Shelter Thermal Simulator — v4
+# Ladakh Shelter Thermal Simulator — v5
 
 Predicts indoor temperature, solar gain and heat flow for high-altitude shelters
 in Ladakh, against live NASA POWER weather. Built for Smart India Hackathon.
@@ -30,7 +30,7 @@ air (fix by sealing).
 
 ```
 physics.py            the energy balance — single source of truth
-solar.py              puts NASA's horizontal irradiance onto the window plane
+solar.py              sun position, and irradiance on window / wall / roof planes
   ├── generate_data.py   builds 48,000 rows of training data from it
   │     └── train_model.py  trains the XGBoost surrogate, reports held-out error
   └── main.py            answers /simulate from it exactly, and scores the
@@ -84,41 +84,60 @@ layers and accept a colder room. It is a like-for-like thermal comparison, not a
 claim about current consumption. Absolute loads are returned alongside the saving
 so the number can be checked.
 
-Representative output, Leh, 15 Jan 2026 (outdoor −18.1 to −4.3 °C, site 4533 m):
+Representative output, Leh, 15 Jan 2026 (outdoor −18.1 to −4.3 °C, site 4533 m,
+ground −2.8 °C):
 
-| Build | Indoor | Score | Degree-hours | Heating load | Kerosene saved |
-|---|---|---|---|---|---|
-| Canvas tent | −17.5 to −3.3 °C | 13 | 604 | 388 kWh/d | 0.04 L/d |
-| Mud brick | 3.4 to 9.6 °C | 49 | 215 | 104 kWh/d | 51.7 L/d |
-| Insulated panel | 4.1 to 13.7 °C | 62 | 158 | 13 kWh/d | 61.3 L/d |
+| Build | Indoor | Score | Degree-hours | Heating load |
+|---|---|---|---|---|
+| Canvas tent | −19.7 to 4.2 °C | 14 | 599 | 399 kWh/d |
+| Mud brick | 3.6 to 9.6 °C | 49 | 211 | 111 kWh/d |
+| Insulated panel | 3.4 to 14.4 °C | 62 | 145 | 15 kWh/d |
+
+Where the heat goes, insulated panel over 24 h: walls 39%, roof 22%, draughts
+20%, windows 10%, floor 9%. That split is the actionable output — insulation
+fixes the first two, sealing the third, glazing the fourth.
 
 Held-out surrogate accuracy (20% test split):
 
 | Target | RMSE | R² |
 |---|---|---|
-| Inside_Temp | 0.674 °C | 0.9954 |
-| Solar_Gain | 66.8 W | 0.9871 |
-| Conduction_Loss | 883.8 W | 0.8867 |
-| Infiltration_Loss | 117.3 W | 0.9576 |
+| Inside_Temp | 0.943 °C | 0.9911 |
+| Solar_Gain | 26.0 W | 0.9981 |
+| Conduction_Loss | 1395.9 W | 0.8333 |
+| Infiltration_Loss | 124.8 W | 0.9531 |
 
-## Two corrections in v4
+Conduction is a harder target in v5 than v4 (R² 0.887 → 0.833) because roof and
+wall now sit at different sol-air temperatures. The physics is more correct; the
+surrogate simply has more to learn.
 
-**Altitude.** Air at Leh's 4533 m is 57% of sea-level pressure, but v3 used
-sea-level constants for the heat capacity of indoor air and for infiltration.
-Infiltration loss was overstated by 1.8×. `physics.air_density_ratio()` now
-scales both from the elevation NASA already returns alongside the weather.
+## What v4 and v5 corrected
 
-**Solar plane.** `ALLSKY_SFC_SW_DWN` is global *horizontal* irradiance; windows
-are vertical. v3 fed the horizontal figure straight into a vertical window. At
-34° N in January the sun peaks ~33° up, so a south-facing wall catches **1.48×**
-what the ground does — and in June only 0.42×, the correct seasonal reversal.
-`solar.py` splits the measured irradiance into beam and diffuse (Erbs) and
-projects it onto the glazing plane. `orientation_factor` still derates that
-ideal plane for a shelter that does not face the equator.
+**v4 — altitude.** Air at Leh's 4533 m is 57% of sea-level pressure, but the
+engine used sea-level constants for indoor air heat capacity and infiltration,
+overstating infiltration loss by 1.8×. `physics.air_density_ratio()` now scales
+both from the elevation NASA returns with the weather.
 
-Together these raised the insulated build's daytime peak from 9.0 to 13.7 °C and
-cut its heating load by a quarter. Adding elevation as a model feature also more
-than halved the surrogate's error, from 1.711 to 0.674 °C.
+**v4 — solar plane.** `ALLSKY_SFC_SW_DWN` is global *horizontal* irradiance;
+windows are vertical. At 34° N in January a south-facing wall catches **1.48×**
+what the ground does, and in June only 0.42× — the correct seasonal reversal.
+`solar.py` splits the measurement into beam and diffuse (Erbs) and projects it
+onto each plane.
+
+**v5 — the floor meets the ground, not the air.** Undisturbed soil sits near the
+annual mean temperature (−2.8 °C here, from NASA's climatology) rather than the
+−18 °C night air, with the soil's own resistance in series. Treating the floor
+as one more cold wall overstated losses; it is now about 5% of the total.
+
+**v5 — sunlit surfaces and the night sky.** Opaque walls and roofs absorb
+sunlight and radiate to a cold sky. Both are folded into **sol-air temperature**,
+the standard device: `T_sol-air = T_out + αI/h_o − ΔR/h_o`. A roof under a clear
+night sky behaves as if the air were 3.9 °C colder; in full sun a wall behaves
+as if it were ~24 °C warmer.
+
+The effect is largest on light, thin structures. A canvas tent now runs −19.7 to
++4.2 °C over a January day, where v4 gave −17.5 to −3.3: warmed by sun on the
+fabric, and dipping *below* air temperature at night through radiation — which is
+real, and the same reason frost forms on clear nights when the air is above zero.
 
 ## Known limitations
 
@@ -129,12 +148,11 @@ been validated against measurement, and that is the single biggest gap.
 
 Physics still simplified or absent:
 
-- **No solar absorption on opaque walls or roof.** Only glazing gains heat;
-  dark walls in Ladakh sun are a real source.
-- **No longwave radiation to the night sky.** Substantial at 4500 m under clear
-  skies, and it can push surfaces below air temperature.
-- **The floor loses heat to outdoor air**, at the wall's R-value. Ground is much
-  warmer than air in winter, so floor loss is overstated.
+- **Absorptivity is one fixed value (0.6)** for the whole envelope. A
+  whitewashed wall (0.3) and dark stone (0.9) behave very differently, and that
+  is a cheap, real design lever this does not yet expose.
+- **Ground temperature is the annual mean**, with no seasonal swing or depth
+  profile.
 - **Single lumped thermal mass** — no temperature gradient or time lag through
   wall thickness, which is the very mechanism thermal mass works by. Thick mud
   brick is where this costs most.
