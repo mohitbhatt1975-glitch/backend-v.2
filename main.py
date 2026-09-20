@@ -499,6 +499,8 @@ async def run_simulation(data: ShelterInput):
         "hourly_outside_temp": [round(t, 2) for t in weather["temps"]],
         "hourly_solar_power": [round(v, 1) for v in weather["solar"]],
         "hourly_solar_horizontal": [round(v, 1) for v in weather.get("solar_horizontal", [])],
+        "hourly_solar_wall": [round(v, 1) for v in weather.get("solar_wall", [])],
+        "hourly_wind": [round(v, 2) for v in weather["wind"]],
         "site_elevation_m": round(weather.get("elevation_m", 0.0)),
         "hourly_inside_temp": actual["hourly"]["inside_temp"],
         "hourly_solar_gain": actual["hourly"]["solar_gain"],
