@@ -93,6 +93,39 @@ COMFORT_SCALE_DEGREE_HOURS = 300.0  # decay constant: 300 degC*h -> ~37/100
 # so cache it. Also keeps a demo responsive when judges re-run one location.
 WEATHER_CACHE_TTL_S = 6 * 3600
 _WEATHER_CACHE = {}
+_GROUND_CACHE = {}
+
+
+async def fetch_ground_temperature(client, lat: float, lon: float):
+    """
+    Undisturbed ground temperature, approximated by the annual mean air
+    temperature at the site.
+
+    A few metres down, soil sits close to the yearly average and barely moves
+    with the weather -- which in a Ladakh January is far warmer than the night
+    air. v4 treated the floor as another cold wall losing heat to -18 C, which
+    overstated losses. NASA POWER publishes the climatological annual mean, so
+    use it; on any failure return None and the engine falls back to air
+    temperature, i.e. the old behaviour.
+    """
+    key = (round(lat, 2), round(lon, 2))
+    if key in _GROUND_CACHE:
+        return _GROUND_CACHE[key]
+    url = ("https://power.larc.nasa.gov/api/temporal/climatology/point?"
+           f"parameters=T2M&community=RE&longitude={lon}&latitude={lat}&format=JSON")
+    try:
+        resp = await client.get(url)
+        resp.raise_for_status()
+        monthly = resp.json()["properties"]["parameter"]["T2M"]
+        annual = monthly.get("ANN")
+        if annual is None or annual <= -900:
+            values = [v for k, v in monthly.items() if k != "ANN" and v > -900]
+            annual = sum(values) / len(values) if values else None
+        _GROUND_CACHE[key] = annual
+        return annual
+    except (httpx.HTTPError, KeyError, ValueError, ZeroDivisionError):
+        _GROUND_CACHE[key] = None
+        return None
 
 
 class ShelterInput(BaseModel):
@@ -212,10 +245,16 @@ async def fetch_nasa_weather(lat: float, lon: float, requested_date: Optional[st
                     # ALLSKY_SFC_SW_DWN is global HORIZONTAL irradiance; windows
                     # are vertical, so project it onto the glazing plane.
                     day = datetime.strptime(found["date_used"], "%Y%m%d").date()
+                    doy = day.timetuple().tm_yday
                     found["solar_horizontal"] = list(found["solar"])
-                    found["solar"] = solar.convert_day(
-                        found["solar_horizontal"], lat, day.timetuple().tm_yday
-                    )
+                    found["solar"] = solar.convert_day(found["solar_horizontal"], lat, doy)
+                    # Opaque surfaces see different irradiance again: the roof is
+                    # horizontal, the walls average over four orientations.
+                    found["solar_roof"] = list(found["solar_horizontal"])
+                    found["solar_wall"] = solar.convert_day_walls(
+                        found["solar_horizontal"], lat, doy)
+                    found["sun_track"] = solar.sun_track(lat, doy)
+                    found["ground_temp"] = await fetch_ground_temperature(client, lat, lon)
                     _WEATHER_CACHE[cache_key] = (time.time(), found)
                     return found
                 last_error = f"No day with complete, non-fill data in {start_ds}-{end_ds}"
@@ -230,11 +269,11 @@ async def fetch_nasa_weather(lat: float, lon: float, requested_date: Optional[st
 
 
 def _geometry(params: dict):
-    """Envelope area, volume and shape factor for a config, via the shared engine."""
-    envelope_area, volume = physics.shape_geometry(
+    """Envelope, roof, floor, volume and shape factor for a config."""
+    envelope_area, roof_area, floor_area, volume = physics.shape_geometry(
         params["shape_code"], params["length"], params["width"], params["height"]
     )
-    return envelope_area, volume, envelope_area / volume
+    return envelope_area, roof_area, floor_area, volume, envelope_area / volume
 
 
 def simulate_config(cfg: ShelterInput, weather: dict, overrides: Optional[dict] = None) -> dict:
@@ -251,14 +290,17 @@ def simulate_config(cfg: ShelterInput, weather: dict, overrides: Optional[dict] 
     if overrides:
         params.update(overrides)
 
-    envelope_area, volume, _ = _geometry(params)
+    envelope_area, roof_area, floor_area, volume, _ = _geometry(params)
     density_ratio = physics.air_density_ratio(weather.get("elevation_m", 0.0))
+    ground_temp = weather.get("ground_temp")
     capacitance = physics.thermal_capacitance(
         params["thermal_mass_factor"], envelope_area, volume, density_ratio)
     window_area = min(params["window_area"], physics.max_window_area(envelope_area))
 
     current_temp = params["initial_temp"]
-    hourly = {"inside_temp": [], "solar_gain": [], "conduction_loss": [], "infiltration_loss": []}
+    hourly = {"inside_temp": [], "solar_gain": [], "conduction_loss": [],
+              "infiltration_loss": [], "ground_loss": [],
+              "wall_conduction": [], "roof_conduction": [], "window_conduction": []}
     required_heater_joules = 0.0
     previous_temps = []
 
@@ -271,11 +313,18 @@ def simulate_config(cfg: ShelterInput, weather: dict, overrides: Optional[dict] 
             orientation_factor=params["orientation_factor"], ach=params["ach"],
             occupants=params["occupants"], capacitance=capacitance,
             density_ratio=density_ratio,
+            roof_area=roof_area, floor_area=floor_area, ground_temp=ground_temp,
+            roof_irradiance=weather.get("solar_roof", [0] * 24)[hour],
+            wall_irradiance=weather.get("solar_wall", [0] * 24)[hour],
         )
         hourly["inside_temp"].append(round(r["next_temp"], 2))
         hourly["solar_gain"].append(round(r["solar_gain"], 1))
         hourly["conduction_loss"].append(round(r["conduction_loss"], 1))
         hourly["infiltration_loss"].append(round(r["infiltration_loss"], 1))
+        hourly["ground_loss"].append(round(r["ground_loss"], 1))
+        hourly["wall_conduction"].append(round(r["wall_conduction"], 1))
+        hourly["roof_conduction"].append(round(r["roof_conduction"], 1))
+        hourly["window_conduction"].append(round(r["window_conduction"], 1))
 
         # Fuel is measured against a held setpoint rather than the floating
         # temperature -- see physics.heating_load for why the old form read zero.
@@ -285,6 +334,7 @@ def simulate_config(cfg: ShelterInput, weather: dict, overrides: Optional[dict] 
             window_area=window_area, window_u_value=params["window_u_value"],
             orientation_factor=params["orientation_factor"], ach=params["ach"],
             occupants=params["occupants"], density_ratio=density_ratio,
+            floor_area=floor_area, ground_temp=ground_temp,
         ) * 3600
 
         current_temp = r["next_temp"]
@@ -312,7 +362,7 @@ def surrogate_agreement(cfg: ShelterInput, weather: dict, truth: dict) -> Option
         return None
 
     params = cfg.model_dump()
-    envelope_area, volume, shape_factor = _geometry(params)
+    envelope_area, _roof, _floor, volume, shape_factor = _geometry(params)
     window_area = min(params["window_area"], physics.max_window_area(envelope_area))
 
     rows = []
@@ -322,7 +372,11 @@ def surrogate_agreement(cfg: ShelterInput, weather: dict, truth: dict) -> Option
             params["r_value"], params["thermal_mass_factor"], window_area, params["window_u_value"],
             params["orientation_factor"], params["ach"], params["occupants"],
             weather.get("elevation_m", 0.0),
-            weather["temps"][hour], weather["solar"][hour], weather["wind"][hour],
+            weather.get("ground_temp") if weather.get("ground_temp") is not None else weather["temps"][hour],
+            weather["temps"][hour], weather["solar"][hour],
+            weather.get("solar_roof", [0] * 24)[hour],
+            weather.get("solar_wall", [0] * 24)[hour],
+            weather["wind"][hour],
             truth["previous_temps"][hour],
         ])
     frame = pd.DataFrame(rows, columns=FEATURES)
@@ -393,7 +447,7 @@ def validate_geometry(cfg: ShelterInput) -> None:
     envelope -- and returned confident numbers for it. Glazing displaces opaque
     wall, so it cannot exceed a sane fraction of the envelope.
     """
-    envelope_area, volume = physics.shape_geometry(
+    envelope_area, _roof, _floor, _volume = physics.shape_geometry(
         cfg.shape_code, cfg.length, cfg.width, cfg.height
     )
     limit = physics.max_window_area(envelope_area)
@@ -450,6 +504,24 @@ async def run_simulation(data: ShelterInput):
         "hourly_solar_gain": actual["hourly"]["solar_gain"],
         "hourly_conduction_loss": actual["hourly"]["conduction_loss"],
         "hourly_infiltration_loss": actual["hourly"]["infiltration_loss"],
+        "hourly_ground_loss": actual["hourly"]["ground_loss"],
+        "loss_breakdown": {
+            "walls": actual["hourly"]["wall_conduction"],
+            "roof": actual["hourly"]["roof_conduction"],
+            "windows": actual["hourly"]["window_conduction"],
+            "draughts": actual["hourly"]["infiltration_loss"],
+            "floor": actual["hourly"]["ground_loss"],
+        },
+        "ground_temp_c": (round(weather["ground_temp"], 1)
+                          if weather.get("ground_temp") is not None else None),
+        "sun_track": [{"altitude": round(a, 1), "azimuth": round(z, 1)}
+                      for a, z in weather.get("sun_track", [])],
+        "geometry": {
+            "shape_code": data.shape_code,
+            "length": data.length, "width": data.width, "height": data.height,
+            "window_area": actual["effective_window_area"],
+            "envelope_area": round(actual["envelope_area"], 1),
+        },
         "sustainability": sustainability,
         "livability_score": comfort["livability_score"],
         "comfort": comfort,

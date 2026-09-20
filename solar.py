@@ -109,3 +109,79 @@ def convert_day(hourly_ghi, lat_deg, day_of_year, albedo=DEFAULT_ALBEDO):
         vertical_irradiance(ghi, lat_deg, day_of_year, hour + 0.5, albedo)
         for hour, ghi in enumerate(hourly_ghi)
     ]
+
+
+def _cos_incidence(lat_deg, day_of_year, solar_hour, surface_azimuth_deg):
+    """
+    cos of the angle between the sun and a vertical surface whose normal is
+    surface_azimuth_deg away from equator-facing (positive = toward west).
+    Duffie & Beckman 1.6.2 with tilt = 90 deg.
+    """
+    phi = math.radians(abs(lat_deg))
+    delta = math.radians(_declination_deg(day_of_year)) * (1.0 if lat_deg >= 0 else -1.0)
+    omega = math.radians(15.0 * (solar_hour - 12.0))
+    gamma = math.radians(surface_azimuth_deg)
+    return (-math.sin(delta) * math.cos(phi) * math.cos(gamma)
+            + math.cos(delta) * math.sin(phi) * math.cos(gamma) * math.cos(omega)
+            + math.cos(delta) * math.sin(gamma) * math.sin(omega))
+
+
+def _components(ghi, lat_deg, day_of_year, solar_hour):
+    """Split measured horizontal irradiance into (beam_normal, diffuse, sin_alt)."""
+    sin_alt = sun_altitude_sin(lat_deg, day_of_year, solar_hour)
+    if ghi <= 0 or sin_alt <= 0.01:
+        return 0.0, max(0.0, ghi), sin_alt
+    ecc = 1.0 + 0.033 * math.cos(math.radians(360.0 * day_of_year / 365.0))
+    extraterrestrial = SOLAR_CONSTANT * ecc * sin_alt
+    kt = min(1.0, max(0.0, ghi / extraterrestrial)) if extraterrestrial > 0 else 0.0
+    diffuse = ghi * _diffuse_fraction(kt)
+    beam_normal = max(0.0, ghi - diffuse) / sin_alt
+    return beam_normal, diffuse, sin_alt
+
+
+def wall_average_irradiance(ghi, lat_deg, day_of_year, solar_hour, albedo=DEFAULT_ALBEDO):
+    """
+    Irradiance averaged over the four cardinal walls, W/m^2.
+
+    A shelter has walls facing every direction; at any hour roughly one of them
+    is well lit and the opposite one is not. Averaging the four faces avoids
+    inventing a "sunlit fraction", and is what the opaque-envelope sol-air
+    calculation should see.
+    """
+    if ghi <= 0:
+        return 0.0
+    beam_normal, diffuse, _ = _components(ghi, lat_deg, day_of_year, solar_hour)
+    sky = diffuse * 0.5
+    ground = ghi * albedo * 0.5
+    total = 0.0
+    for azimuth in (0.0, 90.0, 180.0, 270.0):
+        cos_theta = max(0.0, _cos_incidence(lat_deg, day_of_year, solar_hour, azimuth))
+        total += beam_normal * cos_theta + sky + ground
+    return total / 4.0
+
+
+def sun_position(lat_deg, day_of_year, solar_hour):
+    """
+    (altitude_deg, azimuth_deg) for drawing the sun. Azimuth is measured from
+    due south, positive toward the west, so 0 is solar noon in the northern
+    hemisphere.
+    """
+    phi = math.radians(lat_deg)
+    delta = math.radians(_declination_deg(day_of_year))
+    omega = math.radians(15.0 * (solar_hour - 12.0))
+    sin_alt = (math.sin(delta) * math.sin(phi)
+               + math.cos(delta) * math.cos(phi) * math.cos(omega))
+    altitude = math.degrees(math.asin(max(-1.0, min(1.0, sin_alt))))
+    azimuth = math.degrees(math.atan2(
+        math.cos(delta) * math.sin(omega),
+        math.cos(delta) * math.sin(phi) * math.cos(omega) - math.sin(delta) * math.cos(phi)))
+    return altitude, azimuth
+
+
+def convert_day_walls(hourly_ghi, lat_deg, day_of_year, albedo=DEFAULT_ALBEDO):
+    return [wall_average_irradiance(g, lat_deg, day_of_year, h + 0.5, albedo)
+            for h, g in enumerate(hourly_ghi)]
+
+
+def sun_track(lat_deg, day_of_year):
+    return [sun_position(lat_deg, day_of_year, h + 0.5) for h in range(24)]

@@ -32,8 +32,9 @@ from xgboost import XGBRegressor
 FEATURES = [
     "Shape_Code", "Length", "Width", "Height", "Shape_Factor",
     "R_Value", "Thermal_Mass_Factor", "Window_Area", "Window_U_Value",
-    "Orientation_Factor", "ACH", "Occupants", "Elevation",
-    "Outside_Temp", "Solar_Power", "Wind_Speed", "Previous_Temp",
+    "Orientation_Factor", "ACH", "Occupants", "Elevation", "Ground_Temp",
+    "Outside_Temp", "Solar_Power", "Roof_Irradiance", "Wall_Irradiance",
+    "Wind_Speed", "Previous_Temp",
 ]
 
 # Monotonic constraint per feature, in FEATURES order.
@@ -41,38 +42,44 @@ FEATURES = [
 #  -1 -> output must be non-increasing as this feature increases
 #   0 -> no constraint (relationship isn't monotonic / isn't known a priori)
 #
-# Elevation is left unconstrained in every target. Thinner air cuts the
-# infiltration conductance, which warms a shelter losing heat but cools one
-# gaining it from warmer outside air -- the sign genuinely depends on the
-# temperature difference, so asserting one would be wrong.
+# Elevation stays unconstrained everywhere: thinner air cuts the infiltration
+# conductance, which warms a shelter losing heat but cools one gaining it from
+# warmer outside air, so the sign depends on the temperature difference.
+# Ground_Temp, Roof_Irradiance and Wall_Irradiance are constrained only on
+# Inside_Temp, where each strictly raises the equivalent outdoor temperature the
+# shelter chases; their effect on the individual loss terms is not monotonic.
 MONOTONE = {
     "Inside_Temp": (
         0, 0, 0, 0, 0,        # Shape_Code, Length, Width, Height, Shape_Factor
         1, 0,                 # R_Value (+), Thermal_Mass_Factor (ambiguous over a day)
         0, -1,                # Window_Area (trade-off), Window_U_Value (-)
-        1, -1, 1, 0,          # Orientation_Factor (+), ACH (-), Occupants (+), Elevation
-        1, 1, -1, 1,          # Outside_Temp (+), Solar_Power (+), Wind_Speed (-), Previous_Temp (+)
+        1, -1, 1, 0, 1,       # Orientation (+), ACH (-), Occupants (+), Elevation, Ground_Temp (+)
+        1, 1, 1, 1,           # Outside_Temp (+), Solar_Power (+), Roof_Irr (+), Wall_Irr (+)
+        -1, 1,                # Wind_Speed (-), Previous_Temp (+)
     ),
     "Solar_Gain": (
         0, 0, 0, 0, 0,
         0, 0,
         1, 0,                 # Window_Area (+)
-        1, 0, 0, 0,           # Orientation_Factor (+)
+        1, 0, 0, 0, 0,        # Orientation_Factor (+)
         0, 1, 0, 0,           # Solar_Power (+)
+        0, 0,
     ),
     "Conduction_Loss": (
         0, 0, 0, 0, 0,
         -1, 0,                # R_Value (-)
         0, 1,                 # Window_U_Value (+)
-        0, 0, 0, 0,
-        -1, 0, 1, 1,          # Outside_Temp (-), Wind_Speed (+), Previous_Temp (+)
+        0, 0, 0, 0, 0,
+        -1, 0, 0, 0,          # Outside_Temp (-)
+        1, 1,                 # Wind_Speed (+), Previous_Temp (+)
     ),
     "Infiltration_Loss": (
         0, 0, 0, 0, 0,
         0, 0,
         0, 0,
-        0, 1, 0, 0,           # ACH (+)
-        -1, 0, 0, 1,          # Outside_Temp (-), Previous_Temp (+)
+        0, 1, 0, 0, 0,        # ACH (+)
+        -1, 0, 0, 0,          # Outside_Temp (-)
+        0, 1,                 # Previous_Temp (+)
     ),
 }
 

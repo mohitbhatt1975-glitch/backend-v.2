@@ -156,6 +156,8 @@
     transition: all .16s;
   }
   .preset:hover { border-color: var(--accent); color: var(--accent); transform: translateY(-1px); }
+  .preset[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); font-weight: 650;
+    background: color-mix(in srgb, var(--accent) 12%, var(--surface-2)); }
 
   /* ---------- fieldsets ---------- */
   form { padding: 4px 14px 16px; }
@@ -265,6 +267,34 @@
   .tile .u { font-size: 13px; font-weight: 500; color: var(--text-secondary); margin-left: 3px; }
 
   .chart-card { padding: 17px 18px 15px; margin-bottom: 18px; }
+
+  /* 3D view */
+  .view3d-wrap { position: relative; border-radius: 10px; overflow: hidden; background: var(--surface-2); }
+  .view3d-wrap canvas { display: block; width: 100%; height: 340px; cursor: grab; }
+  .view3d-wrap canvas:active { cursor: grabbing; }
+  .view3d-hud {
+    position: absolute; left: 12px; top: 12px; pointer-events: none;
+    font-variant-numeric: tabular-nums; font-size: 12.5px; color: var(--text-primary);
+    background: color-mix(in srgb, var(--surface-1) 86%, transparent);
+    border: 1px solid var(--border); border-radius: 8px; padding: 7px 10px; line-height: 1.5;
+  }
+  .view3d-hud b { font-size: 15px; }
+  .view3d-bar { display: flex; align-items: center; gap: 12px; margin-top: 11px; flex-wrap: wrap; }
+  .view3d-bar input[type="range"] { flex: 1; min-width: 160px; }
+  .play-btn {
+    background: var(--accent); color: #fff; border: 0; border-radius: 8px;
+    padding: 7px 15px; font-size: 13px; font-weight: 600; cursor: pointer; flex: none;
+  }
+  .play-btn:hover { background: var(--accent-hi); }
+
+  /* heat-loss breakdown */
+  .breakdown { display: flex; flex-direction: column; gap: 8px; }
+  .bd-row { display: flex; align-items: center; gap: 10px; font-size: 13px; }
+  .bd-name { width: 74px; color: var(--text-secondary); flex: none; }
+  .bd-track { flex: 1; height: 15px; background: var(--surface-3); border-radius: 4px; overflow: hidden; }
+  .bd-fill { height: 100%; border-radius: 4px; }
+  .bd-val { width: 96px; text-align: right; font-variant-numeric: tabular-nums;
+            font-weight: 620; flex: none; }
   .surrogate {
     display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
     font-size: 12.5px; color: var(--text-secondary);
@@ -339,10 +369,11 @@
   <div class="card controls">
     <div class="preset-bar">
       <div class="lbl">Quick presets</div>
-      <div class="presets">
-        <button class="preset" type="button" data-preset="tent">Canvas tent</button>
-        <button class="preset" type="button" data-preset="mud">Mud brick</button>
-        <button class="preset" type="button" data-preset="panel">Insulated</button>
+      <div class="presets" style="grid-template-columns:repeat(2,1fr)" id="buildMode">
+        <button class="preset" type="button" data-preset="tent" aria-pressed="false">Canvas tent</button>
+        <button class="preset" type="button" data-preset="mud" aria-pressed="false">Mud brick</button>
+        <button class="preset" type="button" data-preset="panel" aria-pressed="false">Insulated</button>
+        <button class="preset" type="button" data-preset="custom" aria-pressed="true">Custom build</button>
       </div>
     </div>
 
@@ -471,6 +502,7 @@
   </section>
 </main>
 
+<script src="/static/vendor/three.min.js"></script>
 <script>
 (function () {
   "use strict";
@@ -519,8 +551,19 @@
     mud:   { r_value: .6,  thermal_mass_factor: 400000, window_area: 2,   window_u_value: 2.8, orientation_factor: .8,  ach: 2,  shape: 1 },
     panel: { r_value: 3,   thermal_mass_factor: 30000,  window_area: 3.5, window_u_value: 1.2, orientation_factor: .95, ach: .6, shape: 1 }
   };
+  function markBuild(name) {
+    document.querySelectorAll("#buildMode .preset").forEach(function (x) {
+      x.setAttribute("aria-pressed", x.dataset.preset === name ? "true" : "false");
+    });
+  }
+  document.querySelectorAll("[data-slider] input, #shapes").forEach(function (el) {
+    el.addEventListener("input", function () { markBuild("custom"); });
+    el.addEventListener("click", function () { markBuild("custom"); });
+  });
+
   document.querySelectorAll(".preset").forEach(function (btn) {
     btn.addEventListener("click", function () {
+      if (btn.dataset.preset === "custom") { markBuild("custom"); return; }
       var p = PRESETS[btn.dataset.preset];
       Object.keys(p).forEach(function (k) {
         if (k === "shape") {
@@ -532,6 +575,7 @@
         input.value = p[k];
         syncField(input.closest("[data-slider]"), true);
       });
+      markBuild(btn.dataset.preset);
     });
   });
 
@@ -686,6 +730,16 @@
       '<p class="chart-note">The gap between the lines is the shelter doing its job. Indoor peaks hours ' +
       'after outdoor — that delay is thermal mass.</p>' +
       '<div class="legend" id="lg1"></div><div class="chart-wrap" id="c1"></div>' + table(d) + "</div>" +
+      '<div class="card chart-card"><h2 class="chart-title">The shelter, hour by hour</h2>' +
+      '<p class="chart-note">Drag to orbit, scroll to zoom. The sun follows its real track for this ' +
+      'date and latitude, and the shelter is tinted by how warm it is inside.</p>' +
+      '<div class="view3d-wrap"><canvas id="view3d"></canvas><div class="view3d-hud" id="hud3d"></div></div>' +
+      '<div class="view3d-bar"><button class="play-btn" type="button" id="playBtn">Play day</button>' +
+      '<input type="range" id="hourSlider" min="0" max="23" step="1" value="12"></div></div>' +
+      '<div class="card chart-card"><h2 class="chart-title">Where the heat goes</h2>' +
+      '<p class="chart-note">Total over 24 hours. This is the number that tells you what to fix first \u2014 ' +
+      'insulation for walls and roof, sealing for draughts, glazing for windows.</p>' +
+      '<div class="breakdown" id="breakdown"></div></div>' +
       '<div class="card chart-card"><h2 class="chart-title">Hourly heat flow</h2>' +
       '<p class="chart-note">Conduction escapes <em>through</em> walls and glass; infiltration is heat carried ' +
       'out by air leaking <em>around</em> them. Below zero, the outside air is warmer and heat flows back in.</p>' +
@@ -713,7 +767,220 @@
       axis: function (v) { return Math.abs(v) >= 1000 ? (v / 1000).toFixed(1) + "k" : v.toFixed(0); },
       tip: function (v) { return Math.round(v).toLocaleString() + " W"; }
     });
+    renderBreakdown(d);
+    Shelter3D.mount(d);
   }
+
+  /* ---------- heat-loss breakdown ---------- */
+  var BD_LABELS = { walls: "Walls", roof: "Roof", windows: "Windows",
+                    draughts: "Draughts", floor: "Floor" };
+  function renderBreakdown(d) {
+    var host = document.getElementById("breakdown");
+    if (!host || !d.loss_breakdown) return;
+    var colors = { walls: "--series-1", roof: "--series-2", windows: "--series-3",
+                   draughts: "--series-1", floor: "--series-2" };
+    var totals = Object.keys(d.loss_breakdown).map(function (k) {
+      return { key: k, wh: d.loss_breakdown[k].reduce(function (a, b) { return a + b; }, 0) };
+    }).sort(function (x, y) { return Math.abs(y.wh) - Math.abs(x.wh); });
+
+    var peak = Math.max.apply(null, totals.map(function (t) { return Math.abs(t.wh); })) || 1;
+    var sum = totals.reduce(function (a, t) { return a + Math.abs(t.wh); }, 0) || 1;
+
+    host.innerHTML = totals.map(function (t) {
+      var gained = t.wh < 0;   // negative means heat flowed IN through that path
+      var share = (100 * Math.abs(t.wh) / sum).toFixed(0);
+      return '<div class="bd-row">' +
+        '<span class="bd-name">' + BD_LABELS[t.key] + "</span>" +
+        '<span class="bd-track"><span class="bd-fill" style="width:' +
+          (100 * Math.abs(t.wh) / peak).toFixed(1) + "%;background:var(" + colors[t.key] +
+          ");opacity:" + (gained ? 0.45 : 1) + '"></span></span>' +
+        '<span class="bd-val">' + (gained ? "+" : "") + Math.abs(t.wh / 1000).toFixed(1) +
+          " kWh (" + share + "%)</span></div>";
+    }).join("");
+  }
+
+  /* ---------- 3D view ---------- */
+  var Shelter3D = (function () {
+    var renderer, scene, camera, shelter, windowPane, sun, sunLight, ambient;
+    var data = null, hour = 12, timer = null;
+    var orbit = { az: -0.7, el: 0.5, dist: 18 };
+
+    function tempColor(t) {
+      var f = Math.max(0, Math.min(1, (t + 25) / 55));
+      var cold = { r: 0x2a, g: 0x78, b: 0xd6 }, warm = { r: 0xeb, g: 0x68, b: 0x34 };
+      return (Math.round(cold.r + (warm.r - cold.r) * f) << 16) |
+             (Math.round(cold.g + (warm.g - cold.g) * f) << 8) |
+              Math.round(cold.b + (warm.b - cold.b) * f);
+    }
+
+    function buildGeometry(g) {
+      var L = g.length, W = g.width, H = g.height, mesh;
+      if (g.shape_code === 1) {
+        mesh = new THREE.BoxGeometry(L, H, W);
+        mesh.translate(0, H / 2, 0);
+      } else if (g.shape_code === 2) {
+        mesh = new THREE.SphereGeometry(L / 2, 36, 18, 0, Math.PI * 2, 0, Math.PI / 2);
+      } else if (g.shape_code === 3) {
+        var tri = new THREE.Shape();
+        tri.moveTo(-W / 2, 0); tri.lineTo(W / 2, 0); tri.lineTo(0, H); tri.lineTo(-W / 2, 0);
+        mesh = new THREE.ExtrudeGeometry(tri, { depth: L, bevelEnabled: false });
+        mesh.rotateY(Math.PI / 2); mesh.translate(-L / 2, 0, 0);
+      } else if (g.shape_code === 4) {
+        mesh = new THREE.CylinderGeometry(L / 2, L / 2, H, 36);
+        mesh.translate(0, H / 2, 0);
+      } else {
+        mesh = new THREE.CylinderGeometry(W / 2, W / 2, L, 36, 1, false, 0, Math.PI);
+        mesh.rotateZ(Math.PI / 2); mesh.rotateY(Math.PI / 2);
+      }
+      return mesh;
+    }
+
+    function init(canvas) {
+      renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true, alpha: true });
+      renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
+      scene = new THREE.Scene();
+      camera = new THREE.PerspectiveCamera(42, 2, 0.1, 500);
+
+      ambient = new THREE.AmbientLight(0xffffff, 0.55);
+      scene.add(ambient);
+      sunLight = new THREE.DirectionalLight(0xffffff, 0.9);
+      scene.add(sunLight);
+
+      var ground = new THREE.Mesh(
+        new THREE.CircleGeometry(26, 48),
+        new THREE.MeshLambertMaterial({ color: 0x8c8f93 })
+      );
+      ground.rotation.x = -Math.PI / 2;
+      ground.position.y = -0.01;
+      scene.add(ground);
+
+      // a marker pointing due south, so orientation is readable
+      var southMark = new THREE.Mesh(
+        new THREE.BoxGeometry(0.35, 0.05, 9),
+        new THREE.MeshBasicMaterial({ color: 0x2a78d6 })
+      );
+      southMark.position.set(0, 0.03, 10);
+      scene.add(southMark);
+
+      sun = new THREE.Mesh(
+        new THREE.SphereGeometry(0.75, 20, 14),
+        new THREE.MeshBasicMaterial({ color: 0xffd166 })
+      );
+      scene.add(sun);
+
+      var dragging = false, lastX = 0, lastY = 0;
+      canvas.addEventListener("mousedown", function (e) { dragging = true; lastX = e.clientX; lastY = e.clientY; });
+      window.addEventListener("mouseup", function () { dragging = false; });
+      window.addEventListener("mousemove", function (e) {
+        if (!dragging) return;
+        orbit.az -= (e.clientX - lastX) * 0.008;
+        orbit.el = Math.max(0.08, Math.min(1.45, orbit.el + (e.clientY - lastY) * 0.006));
+        lastX = e.clientX; lastY = e.clientY; draw();
+      });
+      canvas.addEventListener("wheel", function (e) {
+        e.preventDefault();
+        orbit.dist = Math.max(7, Math.min(46, orbit.dist + (e.deltaY > 0 ? 1.6 : -1.6)));
+        draw();
+      }, { passive: false });
+    }
+
+    function draw() {
+      if (!renderer || !data) return;
+      var canvas = renderer.domElement;
+      var w = canvas.clientWidth, h = canvas.clientHeight;
+      if (canvas.width !== w || canvas.height !== h) {
+        renderer.setSize(w, h, false);
+        camera.aspect = w / h; camera.updateProjectionMatrix();
+      }
+      camera.position.set(
+        orbit.dist * Math.cos(orbit.el) * Math.sin(orbit.az),
+        orbit.dist * Math.sin(orbit.el),
+        orbit.dist * Math.cos(orbit.el) * Math.cos(orbit.az)
+      );
+      camera.lookAt(0, 1.2, 0);
+      renderer.render(scene, camera);
+    }
+
+    function setHour(h) {
+      hour = h;
+      if (!data) return;
+      var t = data.hourly_inside_temp[h];
+      shelter.material.color.setHex(tempColor(t));
+
+      var p = (data.sun_track && data.sun_track[h]) || { altitude: -10, azimuth: 0 };
+      var alt = p.altitude * Math.PI / 180, az = p.azimuth * Math.PI / 180;
+      var up = Math.max(-0.2, Math.sin(alt));
+      // +Z is south, +X is west, +Y is up
+      var dir = new THREE.Vector3(Math.cos(alt) * Math.sin(az), up, Math.cos(alt) * Math.cos(az));
+      sun.position.copy(dir.clone().multiplyScalar(19));
+      sun.visible = p.altitude > -2;
+      sunLight.position.copy(dir.clone().multiplyScalar(30));
+      var daylight = Math.max(0, Math.sin(alt));
+      sunLight.intensity = 0.15 + 1.0 * daylight;
+      ambient.intensity = 0.28 + 0.34 * daylight;
+      scene.background = null;
+
+      var hh = (h < 10 ? "0" + h : h) + ":00";
+      document.getElementById("hud3d").innerHTML =
+        hh + "<br><b>" + t.toFixed(1) + " &deg;C</b> inside<br>" +
+        data.hourly_outside_temp[h].toFixed(1) + " &deg;C outside<br>" +
+        "sun " + (p.altitude > 0 ? p.altitude.toFixed(0) + "&deg; up" : "below horizon");
+      var slider = document.getElementById("hourSlider");
+      if (slider && +slider.value !== h) slider.value = h;
+      draw();
+    }
+
+    function mount(d) {
+      data = d;
+      var canvas = document.getElementById("view3d");
+      if (!canvas || typeof THREE === "undefined") return;
+      if (!renderer) init(canvas);
+      else renderer.domElement = canvas;
+
+      if (shelter) { scene.remove(shelter); shelter.geometry.dispose(); }
+      if (windowPane) scene.remove(windowPane);
+
+      var g = d.geometry;
+      shelter = new THREE.Mesh(buildGeometry(g),
+        new THREE.MeshLambertMaterial({ color: 0x2a78d6 }));
+      scene.add(shelter);
+
+      // glazing on the sun-facing (south, +Z) face
+      var side = Math.max(0.6, Math.sqrt(Math.max(0.3, g.window_area)));
+      windowPane = new THREE.Mesh(
+        new THREE.PlaneGeometry(side, Math.min(side, g.height * 0.8)),
+        new THREE.MeshBasicMaterial({ color: 0xbfe0ff, transparent: true, opacity: 0.92,
+                                      side: THREE.DoubleSide })
+      );
+      var depth = (g.shape_code === 1 || g.shape_code === 3) ? g.width / 2 : g.length / 2;
+      windowPane.position.set(0, Math.min(g.height * 0.55, 1.6), depth + 0.03);
+      scene.add(windowPane);
+
+      orbit.dist = Math.max(11, Math.max(g.length, g.width) * 2.4);
+      setHour(Math.min(23, hour));
+      if (!Shelter3D._wired) {
+        window.addEventListener("resize", draw);
+        Shelter3D._wired = true;
+      }
+      var slider = document.getElementById("hourSlider");
+      slider.addEventListener("input", function () { stop(); setHour(+slider.value); });
+      document.getElementById("playBtn").addEventListener("click", toggle);
+    }
+
+    function stop() {
+      if (timer) { clearInterval(timer); timer = null; }
+      var b = document.getElementById("playBtn");
+      if (b) b.textContent = "Play day";
+    }
+    function toggle() {
+      var b = document.getElementById("playBtn");
+      if (timer) { stop(); return; }
+      b.textContent = "Pause";
+      timer = setInterval(function () { setHour((hour + 1) % 24); }, 420);
+    }
+
+    return { mount: mount, _wired: false };
+  })();
 
   /* ---------- submit ---------- */
   var form = document.getElementById("cfgForm"), btn = document.getElementById("runBtn");
