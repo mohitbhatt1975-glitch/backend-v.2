@@ -804,6 +804,7 @@
     var renderer, scene, camera, shelter, windowPane, sun, sunLight, ambient;
     var data = null, hour = 12, timer = null;
     var orbit = { az: -0.7, el: 0.5, dist: 18 };
+    var drag = { on: false, x: 0, y: 0 }, windowWired = false;
 
     function tempColor(t) {
       var f = Math.max(0, Math.min(1, (t + 25) / 55));
@@ -836,10 +837,20 @@
     }
 
     function init(canvas) {
+      // The results panel is rebuilt on every run, which destroys the old
+      // <canvas>. A WebGL renderer is bound to the canvas it was constructed
+      // with -- reassigning .domElement does NOT rebind the context, so the
+      // renderer would keep drawing to a detached element and the view would go
+      // blank on the second run. Build a fresh renderer whenever the canvas
+      // changes, and dispose the old one so contexts don't leak.
+      if (renderer) {
+        try { renderer.dispose(); } catch (e) {}
+      }
       renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true, alpha: true });
       renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
       scene = new THREE.Scene();
       camera = new THREE.PerspectiveCamera(42, 2, 0.1, 500);
+      shelter = null; windowPane = null;
 
       ambient = new THREE.AmbientLight(0xffffff, 0.55);
       scene.add(ambient);
@@ -868,20 +879,26 @@
       );
       scene.add(sun);
 
-      var dragging = false, lastX = 0, lastY = 0;
-      canvas.addEventListener("mousedown", function (e) { dragging = true; lastX = e.clientX; lastY = e.clientY; });
-      window.addEventListener("mouseup", function () { dragging = false; });
-      window.addEventListener("mousemove", function (e) {
-        if (!dragging) return;
-        orbit.az -= (e.clientX - lastX) * 0.008;
-        orbit.el = Math.max(0.08, Math.min(1.45, orbit.el + (e.clientY - lastY) * 0.006));
-        lastX = e.clientX; lastY = e.clientY; draw();
+      canvas.addEventListener("mousedown", function (e) {
+        drag.on = true; drag.x = e.clientX; drag.y = e.clientY;
       });
       canvas.addEventListener("wheel", function (e) {
         e.preventDefault();
         orbit.dist = Math.max(7, Math.min(46, orbit.dist + (e.deltaY > 0 ? 1.6 : -1.6)));
         draw();
       }, { passive: false });
+
+      if (!windowWired) {
+        window.addEventListener("mouseup", function () { drag.on = false; });
+        window.addEventListener("mousemove", function (e) {
+          if (!drag.on) return;
+          orbit.az -= (e.clientX - drag.x) * 0.008;
+          orbit.el = Math.max(0.08, Math.min(1.45, orbit.el + (e.clientY - drag.y) * 0.006));
+          drag.x = e.clientX; drag.y = e.clientY; draw();
+        });
+        window.addEventListener("resize", draw);
+        windowWired = true;
+      }
     }
 
     function draw() {
@@ -934,8 +951,7 @@
       data = d;
       var canvas = document.getElementById("view3d");
       if (!canvas || typeof THREE === "undefined") return;
-      if (!renderer) init(canvas);
-      else renderer.domElement = canvas;
+      if (!renderer || renderer.domElement !== canvas) init(canvas);
 
       if (shelter) { scene.remove(shelter); shelter.geometry.dispose(); }
       if (windowPane) scene.remove(windowPane);
@@ -958,10 +974,6 @@
 
       orbit.dist = Math.max(11, Math.max(g.length, g.width) * 2.4);
       setHour(Math.min(23, hour));
-      if (!Shelter3D._wired) {
-        window.addEventListener("resize", draw);
-        Shelter3D._wired = true;
-      }
       var slider = document.getElementById("hourSlider");
       slider.addEventListener("input", function () { stop(); setHour(+slider.value); });
       document.getElementById("playBtn").addEventListener("click", toggle);
@@ -979,7 +991,7 @@
       timer = setInterval(function () { setHour((hour + 1) % 24); }, 420);
     }
 
-    return { mount: mount, _wired: false };
+    return { mount: mount };
   })();
 
   /* ---------- submit ---------- */
