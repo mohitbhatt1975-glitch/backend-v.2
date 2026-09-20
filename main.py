@@ -36,7 +36,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 import physics
 import solar
@@ -146,6 +146,22 @@ class ShelterInput(BaseModel):
     date: Optional[str] = Field(None, description="YYYY-MM-DD; defaults to most recent day with complete NASA data")
     surrogate_check: bool = Field(True, description="also score the ML surrogate against the physics engine")
 
+    @field_validator("date")
+    @classmethod
+    def _check_date(cls, value):
+        """
+        Reject a date that isn't a real calendar day, so it fails as a clear 422
+        rather than a confusing 502 about NASA having no data for 29 February in
+        a non-leap year.
+        """
+        if value is None:
+            return value
+        try:
+            datetime.strptime(value.replace("-", ""), "%Y%m%d")
+        except ValueError:
+            raise ValueError(f"{value!r} is not a valid calendar date; use YYYY-MM-DD")
+        return value
+
 
 class CompareRequest(BaseModel):
     configs: List[ShelterInput] = Field(..., min_length=1, max_length=8)
@@ -211,6 +227,20 @@ async def fetch_nasa_weather(lat: float, lon: float, requested_date: Optional[st
         if requested_date:
             ds = requested_date.replace("-", "")
             windows = [(ds, ds, False)]
+            # NASA's solar product lags its meteorology by months, so a date the
+            # user picks can have temperature but no sunlight -- which used to
+            # fail outright with a raw error. Fall back to the same calendar date
+            # in earlier years, exactly as the automatic path does, and flag it.
+            try:
+                asked = datetime.strptime(ds, "%Y%m%d").date()
+                for years_back in (1, 2, 3):
+                    try:
+                        prior = asked.replace(year=asked.year - years_back)
+                    except ValueError:      # 29 February
+                        prior = asked.replace(year=asked.year - years_back, day=28)
+                    windows.append((prior.strftime("%Y%m%d"), prior.strftime("%Y%m%d"), True))
+            except ValueError:
+                pass
         else:
             today = date.today()
             recent_end = today - timedelta(days=NASA_LAG_DAYS)
