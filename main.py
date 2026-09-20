@@ -25,7 +25,7 @@ Changes vs the original:
 
 import math
 import time
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import List, Optional
 
@@ -39,6 +39,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 import physics
+import solar
 from materials_library import MATERIALS, compute_composite_wall
 
 app = FastAPI(title="Ladakh Shelter Thermal Simulator", version="2.0")
@@ -200,10 +201,21 @@ async def fetch_nasa_weather(lat: float, lon: float, requested_date: Optional[st
             try:
                 resp = await client.get(url)
                 resp.raise_for_status()
-                params = resp.json()["properties"]["parameter"]
+                payload = resp.json()
+                params = payload["properties"]["parameter"]
                 found = _pick_most_recent_valid_day(_group_hours_by_day(params))
                 if found is not None:
                     found["is_seasonal_fallback"] = is_fallback
+                    # NASA returns [lon, lat, elevation] for the grid point.
+                    coords = payload.get("geometry", {}).get("coordinates", [])
+                    found["elevation_m"] = float(coords[2]) if len(coords) > 2 else 0.0
+                    # ALLSKY_SFC_SW_DWN is global HORIZONTAL irradiance; windows
+                    # are vertical, so project it onto the glazing plane.
+                    day = datetime.strptime(found["date_used"], "%Y%m%d").date()
+                    found["solar_horizontal"] = list(found["solar"])
+                    found["solar"] = solar.convert_day(
+                        found["solar_horizontal"], lat, day.timetuple().tm_yday
+                    )
                     _WEATHER_CACHE[cache_key] = (time.time(), found)
                     return found
                 last_error = f"No day with complete, non-fill data in {start_ds}-{end_ds}"
@@ -240,7 +252,9 @@ def simulate_config(cfg: ShelterInput, weather: dict, overrides: Optional[dict] 
         params.update(overrides)
 
     envelope_area, volume, _ = _geometry(params)
-    capacitance = physics.thermal_capacitance(params["thermal_mass_factor"], envelope_area, volume)
+    density_ratio = physics.air_density_ratio(weather.get("elevation_m", 0.0))
+    capacitance = physics.thermal_capacitance(
+        params["thermal_mass_factor"], envelope_area, volume, density_ratio)
     window_area = min(params["window_area"], physics.max_window_area(envelope_area))
 
     current_temp = params["initial_temp"]
@@ -256,6 +270,7 @@ def simulate_config(cfg: ShelterInput, weather: dict, overrides: Optional[dict] 
             window_area=window_area, window_u_value=params["window_u_value"],
             orientation_factor=params["orientation_factor"], ach=params["ach"],
             occupants=params["occupants"], capacitance=capacitance,
+            density_ratio=density_ratio,
         )
         hourly["inside_temp"].append(round(r["next_temp"], 2))
         hourly["solar_gain"].append(round(r["solar_gain"], 1))
@@ -269,7 +284,7 @@ def simulate_config(cfg: ShelterInput, weather: dict, overrides: Optional[dict] 
             envelope_area=envelope_area, volume=volume, r_value=params["r_value"],
             window_area=window_area, window_u_value=params["window_u_value"],
             orientation_factor=params["orientation_factor"], ach=params["ach"],
-            occupants=params["occupants"],
+            occupants=params["occupants"], density_ratio=density_ratio,
         ) * 3600
 
         current_temp = r["next_temp"]
@@ -306,6 +321,7 @@ def surrogate_agreement(cfg: ShelterInput, weather: dict, truth: dict) -> Option
             params["shape_code"], params["length"], params["width"], params["height"], shape_factor,
             params["r_value"], params["thermal_mass_factor"], window_area, params["window_u_value"],
             params["orientation_factor"], params["ach"], params["occupants"],
+            weather.get("elevation_m", 0.0),
             weather["temps"][hour], weather["solar"][hour], weather["wind"][hour],
             truth["previous_temps"][hour],
         ])
@@ -428,6 +444,8 @@ async def run_simulation(data: ShelterInput):
         "weather_is_seasonal_fallback": weather.get("is_seasonal_fallback", False),
         "hourly_outside_temp": [round(t, 2) for t in weather["temps"]],
         "hourly_solar_power": [round(v, 1) for v in weather["solar"]],
+        "hourly_solar_horizontal": [round(v, 1) for v in weather.get("solar_horizontal", [])],
+        "site_elevation_m": round(weather.get("elevation_m", 0.0)),
         "hourly_inside_temp": actual["hourly"]["inside_temp"],
         "hourly_solar_gain": actual["hourly"]["solar_gain"],
         "hourly_conduction_loss": actual["hourly"]["conduction_loss"],

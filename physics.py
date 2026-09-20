@@ -37,9 +37,33 @@ INFILTRATION_COEFFICIENT = 0.34    # W/(m^3*K) per air-change-per-hour (standard
 OCCUPANT_HEAT_W = 100.0            # sensible heat output per person
 WIND_SENSITIVITY = 0.05            # conduction multiplier per m/s of wind
 
+SEA_LEVEL_PRESSURE_PA = 101325.0
+
 SECONDS_PER_HOUR = 3600.0
 TEMP_FLOOR = -35.0
 TEMP_CEILING = 50.0
+
+
+def air_density_ratio(elevation_m):
+    """
+    Air density at this altitude relative to sea level, from the barometric
+    formula for the standard atmosphere.
+
+    Everything that moves *air* rather than heat through a solid scales with
+    density: the heat capacity of the air inside, and the energy carried out by
+    infiltration. v3 used sea-level constants, which for Leh at 4533 m overstated
+    infiltration loss by a factor of 1.8 -- an awkward error in a project whose
+    entire subject is high altitude, especially since NASA returns the site
+    elevation in the same response the weather arrives in.
+
+    This is a pressure ratio only, so sea level is exactly 1.0. The temperature
+    dependence of density is left inside AIR_VOLUMETRIC_HEAT_CAPACITY and
+    INFILTRATION_COEFFICIENT, which are standard-condition values.
+    """
+    if not elevation_m or elevation_m <= 0:
+        return 1.0
+    pressure = SEA_LEVEL_PRESSURE_PA * (1.0 - 2.25577e-5 * elevation_m) ** 5.25588
+    return pressure / SEA_LEVEL_PRESSURE_PA
 
 
 def shape_geometry(shape_code, length, width, height):
@@ -78,23 +102,25 @@ def max_window_area(envelope_area):
     return 0.6 * envelope_area
 
 
-def thermal_capacitance(thermal_mass_factor, envelope_area, volume):
+def thermal_capacitance(thermal_mass_factor, envelope_area, volume, density_ratio=1.0):
     """Total heat capacity of structure + enclosed air, in J/K."""
-    return thermal_mass_factor * envelope_area + volume * AIR_VOLUMETRIC_HEAT_CAPACITY
+    return (thermal_mass_factor * envelope_area
+            + volume * AIR_VOLUMETRIC_HEAT_CAPACITY * density_ratio)
 
 
-def conductance(envelope_area, window_area, r_value, window_u_value, ach, volume, wind_speed):
+def conductance(envelope_area, window_area, r_value, window_u_value, ach, volume,
+                wind_speed, density_ratio=1.0):
     """Total heat-loss conductance UA of the shelter, in W/K."""
     wind_multiplier = 1 + (wind_speed * WIND_SENSITIVITY)
     opaque_area = max(0.0, envelope_area - window_area)
     return ((1 / r_value) * opaque_area * wind_multiplier
             + window_u_value * window_area * wind_multiplier
-            + ach * volume * INFILTRATION_COEFFICIENT)
+            + ach * volume * INFILTRATION_COEFFICIENT * density_ratio)
 
 
 def heating_load(setpoint_c, outside_temp, solar_power, wind_speed, *,
                  envelope_area, volume, r_value, window_area, window_u_value,
-                 orientation_factor, ach, occupants):
+                 orientation_factor, ach, occupants, density_ratio=1.0):
     """
     Heater power needed to hold `setpoint_c` for this hour, in W.
 
@@ -108,7 +134,7 @@ def heating_load(setpoint_c, outside_temp, solar_power, wind_speed, *,
     heat (sun plus bodies) offsets the loss, and whatever is left is fuel.
     """
     ua_total = conductance(envelope_area, window_area, r_value, window_u_value,
-                           ach, volume, wind_speed)
+                           ach, volume, wind_speed, density_ratio)
     free_heat = (solar_power * window_area * SOLAR_TRANSMITTANCE * orientation_factor
                  + occupants * OCCUPANT_HEAT_W)
     return max(0.0, ua_total * (setpoint_c - outside_temp) - free_heat)
@@ -116,7 +142,7 @@ def heating_load(setpoint_c, outside_temp, solar_power, wind_speed, *,
 
 def step(inside_temp, outside_temp, solar_power, wind_speed, *,
          envelope_area, volume, r_value, window_area, window_u_value,
-         orientation_factor, ach, occupants, capacitance):
+         orientation_factor, ach, occupants, capacitance, density_ratio=1.0):
     """
     Advance one hour of the energy balance, integrated exactly.
 
@@ -151,7 +177,7 @@ def step(inside_temp, outside_temp, solar_power, wind_speed, *,
     # Conductances, W/K
     ua_wall = (1 / r_value) * opaque_area * wind_multiplier
     ua_window = window_u_value * window_area * wind_multiplier
-    ua_infiltration = ach * volume * INFILTRATION_COEFFICIENT
+    ua_infiltration = ach * volume * INFILTRATION_COEFFICIENT * density_ratio
     ua_total = ua_wall + ua_window + ua_infiltration
 
     # Heat in, W

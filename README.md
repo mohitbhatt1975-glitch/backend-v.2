@@ -1,4 +1,4 @@
-# Ladakh Shelter Thermal Simulator — v3
+# Ladakh Shelter Thermal Simulator — v4
 
 Predicts indoor temperature, solar gain and heat flow for high-altitude shelters
 in Ladakh, against live NASA POWER weather. Built for Smart India Hackathon.
@@ -30,6 +30,7 @@ air (fix by sealing).
 
 ```
 physics.py            the energy balance — single source of truth
+solar.py              puts NASA's horizontal irradiance onto the window plane
   ├── generate_data.py   builds 48,000 rows of training data from it
   │     └── train_model.py  trains the XGBoost surrogate, reports held-out error
   └── main.py            answers /simulate from it exactly, and scores the
@@ -83,35 +84,75 @@ layers and accept a colder room. It is a like-for-like thermal comparison, not a
 claim about current consumption. Absolute loads are returned alongside the saving
 so the number can be checked.
 
-Representative output, Leh, 15 Jan 2026 (outdoor −18.1 to −4.3 °C):
+Representative output, Leh, 15 Jan 2026 (outdoor −18.1 to −4.3 °C, site 4533 m):
 
-| Build | Indoor | Score | Degree-hours | Kerosene saved |
-|---|---|---|---|---|
-| Canvas tent | −17.5 to −3.5 °C | 13 | 606 | 0.04 L/d |
-| Mud brick | 2.5 to 9.5 °C | 47 | 228 | 53.5 L/d |
-| Insulated panel | 2.6 to 9.0 °C | 49 | 214 | 63.5 L/d |
+| Build | Indoor | Score | Degree-hours | Heating load | Kerosene saved |
+|---|---|---|---|---|---|
+| Canvas tent | −17.5 to −3.3 °C | 13 | 604 | 388 kWh/d | 0.04 L/d |
+| Mud brick | 3.4 to 9.6 °C | 49 | 215 | 104 kWh/d | 51.7 L/d |
+| Insulated panel | 4.1 to 13.7 °C | 62 | 158 | 13 kWh/d | 61.3 L/d |
 
 Held-out surrogate accuracy (20% test split):
 
 | Target | RMSE | R² |
 |---|---|---|
-| Inside_Temp | 1.711 °C | 0.9703 |
-| Solar_Gain | 59.6 W | 0.9898 |
-| Conduction_Loss | 806.1 W | 0.8903 |
-| Infiltration_Loss | 193.9 W | 0.9572 |
+| Inside_Temp | 0.674 °C | 0.9954 |
+| Solar_Gain | 66.8 W | 0.9871 |
+| Conduction_Loss | 883.8 W | 0.8867 |
+| Infiltration_Loss | 117.3 W | 0.9576 |
+
+## Two corrections in v4
+
+**Altitude.** Air at Leh's 4533 m is 57% of sea-level pressure, but v3 used
+sea-level constants for the heat capacity of indoor air and for infiltration.
+Infiltration loss was overstated by 1.8×. `physics.air_density_ratio()` now
+scales both from the elevation NASA already returns alongside the weather.
+
+**Solar plane.** `ALLSKY_SFC_SW_DWN` is global *horizontal* irradiance; windows
+are vertical. v3 fed the horizontal figure straight into a vertical window. At
+34° N in January the sun peaks ~33° up, so a south-facing wall catches **1.48×**
+what the ground does — and in June only 0.42×, the correct seasonal reversal.
+`solar.py` splits the measured irradiance into beam and diffuse (Erbs) and
+projects it onto the glazing plane. `orientation_factor` still derates that
+ideal plane for a shelter that does not face the equator.
+
+Together these raised the insulated build's daytime peak from 9.0 to 13.7 °C and
+cut its heating load by a quarter. Adding elevation as a model feature also more
+than halved the surrogate's error, from 1.711 to 0.674 °C.
 
 ## Known limitations
 
-- **Solar orientation is one factor (0.3–1.0), not a sun-position model.** A full
-  treatment would compute incidence angle from azimuth, tilt, latitude and hour.
-- **NASA POWER's hourly solar product lags its meteorology by months.** When no
-  recent day has complete data the API falls back to the same calendar window in
-  a previous year and flags it as `weather_is_seasonal_fallback`. Autumn weather
-  flatters a poor shelter, so the dashboard defaults to a January date.
-- **Training data is synthetic**, generated from `physics.py`. The surrogate is
-  validated against that engine, not against measured shelters. Field
-  measurements would be the honest next step.
-- **Single-zone model.** No internal walls, no stratification, no moisture.
+The engine is now internally exact — the energy balance closes to 1e-12 — but
+**exact is not the same as accurate**. Every accuracy figure above compares the
+surrogate to the engine, never the engine to a real shelter. Nothing here has
+been validated against measurement, and that is the single biggest gap.
+
+Physics still simplified or absent:
+
+- **No solar absorption on opaque walls or roof.** Only glazing gains heat;
+  dark walls in Ladakh sun are a real source.
+- **No longwave radiation to the night sky.** Substantial at 4500 m under clear
+  skies, and it can push surfaces below air temperature.
+- **The floor loses heat to outdoor air**, at the wall's R-value. Ground is much
+  warmer than air in winter, so floor loss is overstated.
+- **Single lumped thermal mass** — no temperature gradient or time lag through
+  wall thickness, which is the very mechanism thermal mass works by. Thick mud
+  brick is where this costs most.
+- **Infiltration is a fixed ACH**, unresponsive to wind or stack effect, even
+  though wind does scale conduction.
+- **Wind is a linear fudge** (`1 + 0.05v`), not a surface film-coefficient model.
+- **No moisture, latent heat or stratification**; single zone throughout.
+- **Comfort band 15–25 °C is a generic office band.** Acclimatised occupants
+  have a materially lower neutral temperature; adaptive comfort would move every
+  score.
+- **NASA POWER's hourly solar lags its meteorology by months.** Where no recent
+  day is complete the API falls back to the same calendar window in a previous
+  year and flags it as `weather_is_seasonal_fallback`.
+
+**So state the claim carefully:** this is a design-*comparison* tool, not a
+calibrated predictor. The errors above push every build the same direction and
+largely cancel in a comparison, so "this build needs a seventh of the fuel of
+that one" is supportable. "Your shelter will be 4.1 °C at dawn" is not.
 
 ## Endpoints
 
