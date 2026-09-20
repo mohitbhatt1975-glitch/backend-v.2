@@ -13,7 +13,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Application code and the trained surrogate. training_data.csv is excluded by
 # .dockerignore: it is only needed to retrain, never to serve.
-COPY physics.py materials_library.py main.py ./
+COPY physics.py solar.py materials_library.py main.py ./
 COPY thermal_model_v4.pkl ./
 COPY static/ ./static/
 

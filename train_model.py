@@ -32,7 +32,7 @@ from xgboost import XGBRegressor
 FEATURES = [
     "Shape_Code", "Length", "Width", "Height", "Shape_Factor",
     "R_Value", "Thermal_Mass_Factor", "Window_Area", "Window_U_Value",
-    "Orientation_Factor", "ACH", "Occupants",
+    "Orientation_Factor", "ACH", "Occupants", "Elevation",
     "Outside_Temp", "Solar_Power", "Wind_Speed", "Previous_Temp",
 ]
 
@@ -40,33 +40,38 @@ FEATURES = [
 #  +1 -> output must be non-decreasing as this feature increases
 #  -1 -> output must be non-increasing as this feature increases
 #   0 -> no constraint (relationship isn't monotonic / isn't known a priori)
+#
+# Elevation is left unconstrained in every target. Thinner air cuts the
+# infiltration conductance, which warms a shelter losing heat but cools one
+# gaining it from warmer outside air -- the sign genuinely depends on the
+# temperature difference, so asserting one would be wrong.
 MONOTONE = {
     "Inside_Temp": (
         0, 0, 0, 0, 0,        # Shape_Code, Length, Width, Height, Shape_Factor
         1, 0,                 # R_Value (+), Thermal_Mass_Factor (ambiguous over a day)
         0, -1,                # Window_Area (trade-off), Window_U_Value (-)
-        1, -1, 1,             # Orientation_Factor (+), ACH (-), Occupants (+)
+        1, -1, 1, 0,          # Orientation_Factor (+), ACH (-), Occupants (+), Elevation
         1, 1, -1, 1,          # Outside_Temp (+), Solar_Power (+), Wind_Speed (-), Previous_Temp (+)
     ),
     "Solar_Gain": (
         0, 0, 0, 0, 0,
         0, 0,
         1, 0,                 # Window_Area (+)
-        1, 0, 0,              # Orientation_Factor (+)
+        1, 0, 0, 0,           # Orientation_Factor (+)
         0, 1, 0, 0,           # Solar_Power (+)
     ),
     "Conduction_Loss": (
         0, 0, 0, 0, 0,
         -1, 0,                # R_Value (-)
         0, 1,                 # Window_U_Value (+)
-        0, 0, 0,
+        0, 0, 0, 0,
         -1, 0, 1, 1,          # Outside_Temp (-), Wind_Speed (+), Previous_Temp (+)
     ),
     "Infiltration_Loss": (
         0, 0, 0, 0, 0,
         0, 0,
         0, 0,
-        0, 1, 0,              # ACH (+)
+        0, 1, 0, 0,           # ACH (+)
         -1, 0, 0, 1,          # Outside_Temp (-), Previous_Temp (+)
     ),
 }

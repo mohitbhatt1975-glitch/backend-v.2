@@ -63,7 +63,9 @@ BOUNDS = {
     "ach":               (0.3, 5.0),       # air changes per hour (well-sealed .. leaky)
     "daily_mean_temp":   (-25.0, 5.0),     # deg C, Ladakh-representative winter ambient
     "daily_amplitude":   (4.0, 15.0),      # deg C day/night swing
-    "daily_peak_solar":  (500.0, 1100.0),  # W/m^2, matches Ladakh's high irradiance
+    "daily_peak_solar":  (500.0, 1100.0),  # W/m^2 on the window plane, matches Ladakh's high irradiance
+    "elevation":         (2500.0, 5500.0),  # m; Ladakh valleys to high passes. Thin air carries
+                                            # less heat out through infiltration.
 }
 DIM_ORDER = list(BOUNDS.keys())
 
@@ -116,11 +118,13 @@ def build_dataset():
         daily_mean_temp = row["daily_mean_temp"]
         daily_amplitude = row["daily_amplitude"]
         daily_peak_solar = row["daily_peak_solar"]
+        elevation = row["elevation"]
+        density_ratio = physics.air_density_ratio(elevation)
 
         envelope_area, volume = shape_geometry(shape_code, length, width, height)
         shape_factor = envelope_area / volume
 
-        c_total = thermal_capacitance(thermal_mass_factor, envelope_area, volume)
+        c_total = thermal_capacitance(thermal_mass_factor, envelope_area, volume, density_ratio)
 
         current_inside_temp = rng.uniform(daily_mean_temp - 2, daily_mean_temp + 8)
 
@@ -134,7 +138,7 @@ def build_dataset():
                 envelope_area=envelope_area, volume=volume, r_value=r_value,
                 window_area=window_area, window_u_value=window_u_value,
                 orientation_factor=orientation_factor, ach=ach,
-                occupants=occupants, capacitance=c_total,
+                occupants=occupants, capacitance=c_total, density_ratio=density_ratio,
             )
             solar_gain = r["solar_gain"]
             conduction_loss = r["conduction_loss"]
@@ -144,7 +148,7 @@ def build_dataset():
             rows.append([
                 shape_code, length, width, height, shape_factor,
                 r_value, thermal_mass_factor, window_area, window_u_value,
-                orientation_factor, ach, occupants,
+                orientation_factor, ach, occupants, elevation,
                 outside_temp, solar_power, wind_speed, current_inside_temp,
                 next_inside_temp, solar_gain, conduction_loss, infiltration_loss,
             ])
@@ -157,7 +161,7 @@ def build_dataset():
     columns = [
         "Shape_Code", "Length", "Width", "Height", "Shape_Factor",
         "R_Value", "Thermal_Mass_Factor", "Window_Area", "Window_U_Value",
-        "Orientation_Factor", "ACH", "Occupants",
+        "Orientation_Factor", "ACH", "Occupants", "Elevation",
         "Outside_Temp", "Solar_Power", "Wind_Speed", "Previous_Temp",
         "Inside_Temp", "Solar_Gain", "Conduction_Loss", "Infiltration_Loss",
     ]
