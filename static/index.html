@@ -701,9 +701,10 @@
     var ds = d.weather_date_used, pretty = ds.slice(6, 8) + "/" + ds.slice(4, 6) + "/" + ds.slice(0, 4);
 
     var banner = d.weather_is_seasonal_fallback
-      ? '<div class="banner warn"><strong>Seasonal weather: ' + pretty + '.</strong> NASA POWER\'s hourly ' +
-        "solar product lags months behind its temperature data, so this is the most recent fully-populated " +
-        "day for these coordinates — same season, not today's sky.</div>"
+      ? '<div class="banner warn"><strong>Weather from ' + pretty + '.</strong> NASA POWER\'s hourly ' +
+        "solar data lags months behind its temperature data, so the day you asked for has no sunlight " +
+        "recorded yet. These are real measurements from the same calendar day in an earlier year " +
+        "— the right season for this location, but not that day's actual sky.</div>"
       : '<div class="banner good">Live NASA POWER weather for <strong>' + pretty + "</strong>.</div>";
 
     var su = d.sustainability, cf = d.comfort || {};
