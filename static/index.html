@@ -700,12 +700,38 @@
     var o = d.hourly_outside_temp;
     var ds = d.weather_date_used, pretty = ds.slice(6, 8) + "/" + ds.slice(4, 6) + "/" + ds.slice(0, 4);
 
-    var banner = d.weather_is_seasonal_fallback
-      ? '<div class="banner warn"><strong>Weather from ' + pretty + '.</strong> NASA POWER\'s hourly ' +
-        "solar data lags months behind its temperature data, so the day you asked for has no sunlight " +
-        "recorded yet. These are real measurements from the same calendar day in an earlier year " +
-        "— the right season for this location, but not that day's actual sky.</div>"
-      : '<div class="banner good">Live NASA POWER weather for <strong>' + pretty + "</strong>.</div>";
+    var src = d.weather_source || {};
+    var status = src.status || (d.weather_is_seasonal_fallback ? "seasonal-fallback" : "complete");
+    var provider = src.provider || "NASA POWER";
+    var dataset = src.dataset || "";
+    var reqIso = src.date_requested || "";
+    var reqPretty = reqIso
+      ? reqIso.slice(8, 10) + "/" + reqIso.slice(5, 7) + "/" + reqIso.slice(0, 4)
+      : "";
+
+    var tone, headline, detail;
+    if (status === "seasonal-fallback") {
+      tone = "warn";
+      headline = "Same date, earlier year: " + pretty;
+      detail = "No source has complete data for " + (reqPretty || "the date requested") +
+        " yet, so this is the nearest equivalent \u2014 the same calendar day from an earlier " +
+        "year, which keeps the season right. " + provider + ", " + dataset + ".";
+    } else if (status === "forecast") {
+      tone = "";
+      headline = "Forecast for " + pretty;
+      detail = "This day has not happened yet, so the weather is a prediction rather than a " +
+        "record. " + provider + ", " + dataset + ".";
+    } else {
+      tone = "good";
+      headline = "Weather for " + pretty;
+      detail = provider + ", " + dataset + "." +
+        (reqPretty && src.date_used && reqIso.replace(/-/g, "") !== src.date_used
+          ? " Nearest complete day to " + reqPretty + "."
+          : "");
+    }
+
+    var banner = '<div class="banner ' + tone + '"><strong>' + headline + "</strong> " +
+      detail + "</div>";
 
     var su = d.sustainability, cf = d.comfort || {};
     var sur = d.surrogate_agreement;

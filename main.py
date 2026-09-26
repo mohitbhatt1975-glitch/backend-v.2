@@ -172,6 +172,26 @@ NASA_PARAMS = "T2M,ALLSKY_SFC_SW_DWN,WS10M"
 NASA_LAG_DAYS = 3        # POWER meteorology trails real time by ~2-3 days
 NASA_WINDOW_DAYS = 17    # how far back a single scan reaches
 
+# How each source is described to the user. None of this is raw thermometer
+# data: NASA's solar is satellite-derived through radiative transfer, its
+# meteorology is MERRA-2 reanalysis, and Open-Meteo's archive is ERA5. Saying
+# "real measurements" would overstate all of them.
+SOURCE_NASA = {
+    "provider": "NASA POWER",
+    "dataset": "CERES SYN1deg solar, MERRA-2 meteorology",
+    "kind": "satellite-derived and reanalysis",
+}
+SOURCE_OPEN_METEO_PAST = {
+    "provider": "Open-Meteo",
+    "dataset": "ERA5 reanalysis",
+    "kind": "reanalysis",
+}
+SOURCE_OPEN_METEO_FUTURE = {
+    "provider": "Open-Meteo",
+    "dataset": "operational forecast models",
+    "kind": "forecast",
+}
+
 
 def _group_hours_by_day(params: dict) -> dict:
     """Turn NASA's flat {YYYYMMDDHH: value} maps into {YYYYMMDD: {param: [24 values]}}."""
@@ -187,36 +207,122 @@ def _group_hours_by_day(params: dict) -> dict:
     }
 
 
+def _complete(temps, solar, wind) -> bool:
+    """
+    24 usable hours of every parameter.
+
+    Availability is decided from the values actually returned, never from the
+    calendar. NASA marks absent data with -999 rather than omitting it, so a
+    response can look well-formed and still carry no sunlight at all.
+    """
+    if len(temps) < 24 or len(solar) < 24 or len(wind) < 24:
+        return False
+    combined = list(temps[:24]) + list(solar[:24]) + list(wind[:24])
+    return all(v is not None and v > -900 for v in combined)
+
+
 def _pick_most_recent_valid_day(days: dict) -> Optional[dict]:
-    """Newest day in the window with 24 complete, non-fill hours for all three params."""
+    """Newest day in the window with 24 complete, non-fill hours for all parameters."""
     for day in sorted(days.keys(), reverse=True):
         series = days[day]
-        temps = series["T2M"]
-        solar = series["ALLSKY_SFC_SW_DWN"]
-        wind = series["WS10M"]
-        if len(temps) < 24 or len(solar) < 24 or len(wind) < 24:
-            continue
-        if any(v <= -900 for v in temps[:24] + solar[:24] + wind[:24]):
-            continue
-        return {"temps": temps[:24], "solar": solar[:24], "wind": wind[:24], "date_used": day}
+        temps, solar, wind = series["T2M"], series["ALLSKY_SFC_SW_DWN"], series["WS10M"]
+        if _complete(temps, solar, wind):
+            return {"temps": temps[:24], "solar": solar[:24], "wind": wind[:24], "date_used": day}
     return None
 
 
-async def fetch_nasa_weather(lat: float, lon: float, requested_date: Optional[str]) -> dict:
+async def _fetch_nasa_window(client, lat, lon, start_ds, end_ds) -> Optional[dict]:
+    """One NASA range request; returns the newest complete day in it, or None."""
+    url = (
+        "https://power.larc.nasa.gov/api/temporal/hourly/point?"
+        f"parameters={NASA_PARAMS}&community=RE&"
+        f"longitude={lon}&latitude={lat}&start={start_ds}&end={end_ds}&format=JSON"
+    )
+    try:
+        resp = await client.get(url)
+        resp.raise_for_status()
+        payload = resp.json()
+        found = _pick_most_recent_valid_day(
+            _group_hours_by_day(payload["properties"]["parameter"]))
+        if found is None:
+            return None
+        coords = payload.get("geometry", {}).get("coordinates", [])
+        found["elevation_m"] = float(coords[2]) if len(coords) > 2 else 0.0
+        found["source"] = dict(SOURCE_NASA)
+        return found
+    except (httpx.HTTPError, KeyError, ValueError, IndexError):
+        return None
+
+
+async def _fetch_open_meteo(client, lat, lon, ds) -> Optional[dict]:
     """
-    Fetch 24 hours of T2M / ALLSKY_SFC_SW_DWN / WS10M from NASA POWER.
+    One specific day from Open-Meteo, or None.
 
-    NASA POWER publishes its two products on very different schedules: the
-    meteorology (T2M, WS10M -- MERRA-2) is current to within a few days, but
-    the hourly solar product (ALLSKY_SFC_SW_DWN -- SYN1DEG) lags by months.
-    Recent days therefore come back with valid temperature/wind and -999 fill
-    values for every solar hour.
+    This covers the months NASA's solar product has not caught up to, and
+    extends roughly two weeks ahead. Wind must be requested in m/s -- the
+    default is km/h, which would silently inflate every wind speed by 3.6x.
+    """
+    iso = f"{ds[:4]}-{ds[4:6]}-{ds[6:8]}"
+    common = (f"latitude={lat}&longitude={lon}"
+              "&hourly=temperature_2m,shortwave_radiation,wind_speed_10m"
+              "&wind_speed_unit=ms&timezone=auto")
+    try:
+        target = datetime.strptime(ds, "%Y%m%d").date()
+    except ValueError:
+        return None
+    future = target > date.today()
 
-    So: scan a recent window in ONE range request; if no day in it has
-    complete data, fall back to the same calendar window in previous years,
-    which is fully populated and seasonally equivalent. The day actually used
-    is reported back to the caller, and seasonal fallbacks are flagged rather
-    than passed off as current weather.
+    attempts = []
+    if not future:
+        attempts.append(("https://archive-api.open-meteo.com/v1/archive?"
+                         f"{common}&start_date={iso}&end_date={iso}", SOURCE_OPEN_METEO_PAST))
+    attempts.append(("https://api.open-meteo.com/v1/forecast?"
+                     f"{common}&past_days=92&forecast_days=16",
+                     SOURCE_OPEN_METEO_FUTURE if future else SOURCE_OPEN_METEO_PAST))
+
+    for url, source in attempts:
+        try:
+            resp = await client.get(url)
+            resp.raise_for_status()
+            payload = resp.json()
+            hourly = payload.get("hourly") or {}
+            stamps = hourly.get("time") or []
+            rows = [i for i, t in enumerate(stamps) if t.startswith(iso)]
+            if len(rows) < 24:
+                continue
+            rows = rows[:24]
+            temps = [hourly["temperature_2m"][i] for i in rows]
+            solar = [hourly["shortwave_radiation"][i] for i in rows]
+            wind = [hourly["wind_speed_10m"][i] for i in rows]
+            if not _complete(temps, solar, wind):
+                continue
+            return {
+                "temps": temps, "solar": solar, "wind": wind, "date_used": ds,
+                "elevation_m": float(payload.get("elevation") or 0.0),
+                "source": dict(source),
+            }
+        except (httpx.HTTPError, KeyError, ValueError, TypeError, IndexError):
+            continue
+    return None
+
+
+async def fetch_weather(lat: float, lon: float, requested_date: Optional[str]) -> dict:
+    """
+    24 hours of weather, with provenance, from whichever source can supply it.
+
+    Order of preference:
+
+      1. NASA POWER for the requested day (or the most recent complete day when
+         no date is given). Research-grade, reproducible, the project's baseline.
+      2. Open-Meteo for that same day, covering the months NASA's solar product
+         has not published yet, and dates up to about two weeks ahead.
+      3. NASA POWER for the same calendar date in earlier years.
+
+    Step 3 deliberately holds the *season* rather than jumping to the newest
+    date NASA happens to have. For a thermal design tool the season is the
+    question: answering "how does this shelter behave in late September?" with
+    June weather would be a worse answer than one from the previous September.
+    Whatever happens is reported in `source`, never presented as current.
     """
     cache_key = (round(lat, 3), round(lon, 3), requested_date or "recent")
     hit = _WEATHER_CACHE.get(cache_key)
@@ -224,78 +330,80 @@ async def fetch_nasa_weather(lat: float, lon: float, requested_date: Optional[st
         return hit[1]
 
     async with httpx.AsyncClient(timeout=30.0) as client:
+        today = date.today()
+        found = None
+
         if requested_date:
             ds = requested_date.replace("-", "")
-            windows = [(ds, ds, False)]
-            # NASA's solar product lags its meteorology by months, so a date the
-            # user picks can have temperature but no sunlight -- which used to
-            # fail outright with a raw error. Fall back to the same calendar date
-            # in earlier years, exactly as the automatic path does, and flag it.
-            try:
-                asked = datetime.strptime(ds, "%Y%m%d").date()
+            found = await _fetch_nasa_window(client, lat, lon, ds, ds)
+            if found:
+                found["source"]["status"] = "complete"
+            else:
+                found = await _fetch_open_meteo(client, lat, lon, ds)
+                if found:
+                    found["source"]["status"] = (
+                        "forecast" if found["source"]["kind"] == "forecast" else "complete")
+            if not found:
+                # Same calendar date, earlier years: right season, wrong year.
+                try:
+                    asked = datetime.strptime(ds, "%Y%m%d").date()
+                except ValueError:
+                    asked = None
                 for years_back in (1, 2, 3):
+                    if asked is None:
+                        break
                     try:
                         prior = asked.replace(year=asked.year - years_back)
-                    except ValueError:      # 29 February
+                    except ValueError:            # 29 February
                         prior = asked.replace(year=asked.year - years_back, day=28)
-                    windows.append((prior.strftime("%Y%m%d"), prior.strftime("%Y%m%d"), True))
-            except ValueError:
-                pass
+                    pds = prior.strftime("%Y%m%d")
+                    found = await _fetch_nasa_window(client, lat, lon, pds, pds)
+                    if found:
+                        found["source"]["status"] = "seasonal-fallback"
+                        break
         else:
-            today = date.today()
             recent_end = today - timedelta(days=NASA_LAG_DAYS)
             recent_start = today - timedelta(days=NASA_WINDOW_DAYS)
-            windows = [(recent_start.strftime("%Y%m%d"), recent_end.strftime("%Y%m%d"), False)]
-            for years_back in (1, 2, 3):
-                shift = timedelta(days=365 * years_back)
-                windows.append((
-                    (recent_start - shift).strftime("%Y%m%d"),
-                    (recent_end - shift).strftime("%Y%m%d"),
-                    True,
-                ))
+            found = await _fetch_nasa_window(
+                client, lat, lon, recent_start.strftime("%Y%m%d"), recent_end.strftime("%Y%m%d"))
+            if found:
+                found["source"]["status"] = "complete"
+            else:
+                found = await _fetch_open_meteo(client, lat, lon, recent_end.strftime("%Y%m%d"))
+                if found:
+                    found["source"]["status"] = "complete"
+            if not found:
+                for years_back in (1, 2, 3):
+                    shift = timedelta(days=365 * years_back)
+                    found = await _fetch_nasa_window(
+                        client, lat, lon,
+                        (recent_start - shift).strftime("%Y%m%d"),
+                        (recent_end - shift).strftime("%Y%m%d"))
+                    if found:
+                        found["source"]["status"] = "seasonal-fallback"
+                        break
 
-        last_error = None
-        for start_ds, end_ds, is_fallback in windows:
-            url = (
-                "https://power.larc.nasa.gov/api/temporal/hourly/point?"
-                f"parameters={NASA_PARAMS}&community=RE&"
-                f"longitude={lon}&latitude={lat}&start={start_ds}&end={end_ds}&format=JSON"
-            )
-            try:
-                resp = await client.get(url)
-                resp.raise_for_status()
-                payload = resp.json()
-                params = payload["properties"]["parameter"]
-                found = _pick_most_recent_valid_day(_group_hours_by_day(params))
-                if found is not None:
-                    found["is_seasonal_fallback"] = is_fallback
-                    # NASA returns [lon, lat, elevation] for the grid point.
-                    coords = payload.get("geometry", {}).get("coordinates", [])
-                    found["elevation_m"] = float(coords[2]) if len(coords) > 2 else 0.0
-                    # ALLSKY_SFC_SW_DWN is global HORIZONTAL irradiance; windows
-                    # are vertical, so project it onto the glazing plane.
-                    day = datetime.strptime(found["date_used"], "%Y%m%d").date()
-                    doy = day.timetuple().tm_yday
-                    found["solar_horizontal"] = list(found["solar"])
-                    found["solar"] = solar.convert_day(found["solar_horizontal"], lat, doy)
-                    # Opaque surfaces see different irradiance again: the roof is
-                    # horizontal, the walls average over four orientations.
-                    found["solar_roof"] = list(found["solar_horizontal"])
-                    found["solar_wall"] = solar.convert_day_walls(
-                        found["solar_horizontal"], lat, doy)
-                    found["sun_track"] = solar.sun_track(lat, doy)
-                    found["ground_temp"] = await fetch_ground_temperature(client, lat, lon)
-                    _WEATHER_CACHE[cache_key] = (time.time(), found)
-                    return found
-                last_error = f"No day with complete, non-fill data in {start_ds}-{end_ds}"
-            except (httpx.HTTPError, KeyError, ValueError) as e:
-                last_error = str(e)
-                continue
+        if not found:
+            raise HTTPException(
+                status_code=502,
+                detail=(f"No weather source could supply a complete day near ({lat},{lon}). "
+                        "NASA POWER and Open-Meteo were both tried."))
 
-        raise HTTPException(
-            status_code=502,
-            detail=f"Could not fetch complete NASA weather data near ({lat},{lon}). Last error: {last_error}",
-        )
+        found["source"]["date_used"] = found["date_used"]
+        found["source"]["date_requested"] = requested_date
+        found["is_seasonal_fallback"] = found["source"]["status"] == "seasonal-fallback"
+
+        day = datetime.strptime(found["date_used"], "%Y%m%d").date()
+        doy = day.timetuple().tm_yday
+        found["solar_horizontal"] = list(found["solar"])
+        found["solar"] = solar.convert_day(found["solar_horizontal"], lat, doy)
+        found["solar_roof"] = list(found["solar_horizontal"])
+        found["solar_wall"] = solar.convert_day_walls(found["solar_horizontal"], lat, doy)
+        found["sun_track"] = solar.sun_track(lat, doy)
+        found["ground_temp"] = await fetch_ground_temperature(client, lat, lon)
+
+        _WEATHER_CACHE[cache_key] = (time.time(), found)
+        return found
 
 
 def _geometry(params: dict):
@@ -516,7 +624,7 @@ def materials_composite(req: CompositeWallRequest):
 async def run_simulation(data: ShelterInput):
     validate_geometry(data)
 
-    weather = await fetch_nasa_weather(data.lat, data.lon, data.date)
+    weather = await fetch_weather(data.lat, data.lon, data.date)
     actual = simulate_config(data, weather)
     baseline = simulate_config(data, weather, overrides=BASELINE_OVERRIDES)
 
@@ -526,6 +634,7 @@ async def run_simulation(data: ShelterInput):
     return {
         "weather_date_used": weather["date_used"],
         "weather_is_seasonal_fallback": weather.get("is_seasonal_fallback", False),
+        "weather_source": weather.get("source", {}),
         "hourly_outside_temp": [round(t, 2) for t in weather["temps"]],
         "hourly_solar_power": [round(v, 1) for v in weather["solar"]],
         "hourly_solar_horizontal": [round(v, 1) for v in weather.get("solar_horizontal", [])],
@@ -568,7 +677,7 @@ async def compare_configs(req: CompareRequest):
         validate_geometry(cfg)
 
     first = req.configs[0]
-    weather = await fetch_nasa_weather(first.lat, first.lon, first.date)
+    weather = await fetch_weather(first.lat, first.lon, first.date)
 
     labels = req.labels or [f"Config {i+1}" for i in range(len(req.configs))]
     results = []
@@ -592,6 +701,7 @@ async def compare_configs(req: CompareRequest):
     return {
         "weather_date_used": weather["date_used"],
         "weather_is_seasonal_fallback": weather.get("is_seasonal_fallback", False),
+        "weather_source": weather.get("source", {}),
         "ranked_results": ranked,
     }
 
