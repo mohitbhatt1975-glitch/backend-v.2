@@ -360,6 +360,14 @@ async def fetch_weather(lat: float, lon: float, requested_date: Optional[str]) -
                     found = await _fetch_nasa_window(client, lat, lon, pds, pds)
                     if found:
                         found["source"]["status"] = "seasonal-fallback"
+                        # Two very different reasons land here, and the user
+                        # deserves to know which. A future date beyond the
+                        # forecast horizon is a permanent limit -- nobody
+                        # forecasts three weeks out. A past date is merely
+                        # waiting on NASA to publish.
+                        found["source"]["reason"] = (
+                            "beyond-forecast-horizon" if asked and asked > today
+                            else "not-yet-published")
                         break
         else:
             recent_end = today - timedelta(days=NASA_LAG_DAYS)
