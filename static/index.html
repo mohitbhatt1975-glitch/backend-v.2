@@ -394,7 +394,7 @@
         </div>
         <div class="field">
           <div class="field-head"><label for="sim_date">Weather date</label>
-            <button class="info" type="button" data-tip="Defaults to mid-January, the conditions this project exists for. Clear the field to use the most recent day NASA has complete data for — which in autumn flatters a poor shelter, because the outside air is already near comfort.">i</button>
+            <button class="info" type="button" data-tip="Defaults to mid-January, the conditions this project exists for. Past dates use measured records. Dates up to about two weeks ahead use a forecast. Further ahead than that, no forecast exists, so the same calendar day from an earlier year is used instead and the banner says so.">i</button>
           </div>
           <input type="date" id="sim_date" value="2026-01-15">
         </div>
@@ -713,9 +713,13 @@
     if (status === "seasonal-fallback") {
       tone = "warn";
       headline = "Same date, earlier year: " + pretty;
-      detail = "No source has complete data for " + (reqPretty || "the date requested") +
-        " yet, so this is the nearest equivalent \u2014 the same calendar day from an earlier " +
-        "year, which keeps the season right. " + provider + ", " + dataset + ".";
+      detail = (src.reason === "beyond-forecast-horizon"
+        ? "No weather service forecasts more than about two weeks ahead, so " +
+          (reqPretty || "that date") + " cannot be predicted. "
+        : "No source has published complete data for " + (reqPretty || "that date") +
+          " yet. ") +
+        "This is the same calendar day from an earlier year, which keeps the season right. " +
+        provider + ", " + dataset + ".";
     } else if (status === "forecast") {
       tone = "";
       headline = "Forecast for " + pretty;
