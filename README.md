@@ -1,10 +1,21 @@
 # Ladakh Shelter Thermal Simulator — v5
 
 Predicts indoor temperature, solar gain and heat flow for high-altitude shelters
-in Ladakh, against live NASA POWER weather. Built for Smart India Hackathon.
+in Ladakh, against real NASA POWER and Open-Meteo weather. Built for Smart India
+Hackathon.
 
-**Run it:** `pip install -r requirements.txt`, then `uvicorn main:app`, then open
-<http://127.0.0.1:8000/>. The dashboard and the API are one service.
+### ▶ Live demo: <https://ladakh-shelter-simulator.onrender.com>
+
+Enter a shelter's dimensions, materials, glazing and sealing, and it simulates a
+full 24 hours hour by hour: indoor temperature, where the heat escapes, what it
+would cost to heat, and a 3D view with the sun on its real track for that date
+and latitude.
+
+*(The demo runs on a free tier and sleeps when idle — the first request after a
+quiet period can take up to a minute to wake.)*
+
+**Run it locally:** `pip install -r requirements.txt`, then `uvicorn main:app`,
+then open <http://127.0.0.1:8000/>. The dashboard and the API are one service.
 
 ---
 
